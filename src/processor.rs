@@ -95,6 +95,9 @@ pub async fn run_loop(
     let mut iteration_times: VecDeque<Instant> = VecDeque::with_capacity(FREQUENCY_WINDOW + 1);
     // Track how many messages we last processed so we only re-query when new ones arrive.
     let mut last_processed_total: usize = 0;
+    // Track when the LLM became idle (no new messages to process).
+    // None = currently working, Some = wall-clock ISO-8601 of when idle started.
+    let mut idle_since_wall: Option<String> = None;
 
     loop {
         if shutdown.is_cancelled() {
@@ -116,6 +119,11 @@ pub async fn run_loop(
 
         // Wait if no messages have arrived yet.
         if snapshot.is_empty() {
+            if idle_since_wall.is_none() {
+                let now = Utc::now().to_rfc3339();
+                idle_since_wall = Some(now.clone());
+                web_state.write().expect("web state lock poisoned").idle_since = now;
+            }
             log::info!("[processor] No messages yet — waiting 5s...");
             tokio::select! {
                 _ = tokio::time::sleep(Duration::from_secs(5)) => {}
@@ -128,6 +136,11 @@ pub async fn run_loop(
         }
 
         if total_msgs < MIN_MESSAGES_TO_PROCESS {
+            if idle_since_wall.is_none() {
+                let now = Utc::now().to_rfc3339();
+                idle_since_wall = Some(now.clone());
+                web_state.write().expect("web state lock poisoned").idle_since = now;
+            }
             log::info!(
                 "[processor] Only {} messages (need {}) — waiting 5s...",
                 total_msgs, MIN_MESSAGES_TO_PROCESS
@@ -144,6 +157,11 @@ pub async fn run_loop(
 
         // Wait for NEW messages before re-querying the LLM with the same data.
         if total_msgs <= last_processed_total {
+            if idle_since_wall.is_none() {
+                let now = Utc::now().to_rfc3339();
+                idle_since_wall = Some(now.clone());
+                web_state.write().expect("web state lock poisoned").idle_since = now;
+            }
             log::info!(
                 "[processor] No new messages since last query ({} total) — waiting 5s...",
                 total_msgs
@@ -175,6 +193,12 @@ pub async fn run_loop(
                 format_duration(avg),
                 intervals
             );
+        }
+
+        // Mark LLM as active (no longer idle).
+        if idle_since_wall.is_some() {
+            idle_since_wall = None;
+            web_state.write().expect("web state lock poisoned").idle_since = String::new();
         }
 
         // Step 2: Build token-budgeted prompt

@@ -25,6 +25,9 @@ pub struct WebUpdate {
     pub center_dan_or_or_yehuda_or_jerusalem_danger: bool,
     pub evidence_for_jerusalem_or_center_or_yehuda_not_just_north_or_south: bool,
     pub any_threat: bool,
+    /// ISO-8601 timestamp of when the LLM became idle (waiting for new messages).
+    /// Empty string means the LLM is currently processing.
+    pub idle_since: String,
     /// News items from the last LLM response.
     pub news: Vec<WebNewsItem>,
 }

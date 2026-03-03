@@ -109,6 +109,8 @@ html,body{height:100%;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Ro
   <div id="timer-row">
     <span>Last LLM update:</span>
     <span id="timer-val">&mdash;</span>
+    <span style="margin-left:16px">LLM idle:</span>
+    <span id="idle-val">&mdash;</span>
   </div>
 
   <div id="threat-panel" class="clear">
@@ -142,6 +144,7 @@ var audioCtx       = null;
 var audioUnlocked  = false;
 var lastVersion    = -1;
 var lastTimestamp   = null;
+var lastIdleSince  = '';
 var lastData       = null;
 var consecutiveFails = 0;
 var pollTimer      = null;
@@ -427,6 +430,11 @@ function validatePayload(d){
     errs.push('timestamp: empty string on a non-zero version (' + d.version + ')');
   }
 
+  // idle_since: must be a string (empty = active, ISO-8601 = idle start)
+  if(typeof d.idle_since !== 'string'){
+    errs.push('idle_since: expected string, got ' + typeof d.idle_since);
+  }
+
   // Boolean fields: every one must be present and actually boolean
   for(var i=0; i<EXPECTED_BOOL_KEYS.length; i++){
     var key = EXPECTED_BOOL_KEYS[i];
@@ -465,7 +473,7 @@ function validatePayload(d){
 
   // Warn about unexpected top-level keys (may indicate schema drift)
   var KNOWN_KEYS = {
-    version:1, timestamp:1, news:1,
+    version:1, timestamp:1, idle_since:1, news:1,
     israel_attack_warning:1, israel_actual_red_alerts:1,
     jerusalem_attack_warning:1, jerusalem_actual_red_alerts:1,
     center_dan_or_or_yehuda_or_jerusalem_danger:1,
@@ -500,6 +508,36 @@ function updateTimer(){
     el.style.color = 'var(--yellow)';
   }else{
     el.textContent = m+'m '+String(s).padStart(2,'0')+'s ago';
+    el.style.color = 'var(--dim)';
+  }
+}
+
+function updateIdleTimer(){
+  var el = document.getElementById('idle-val');
+  // Empty idle_since = LLM is actively processing, or no data yet.
+  if(!lastIdleSince){
+    el.textContent = '\u2014';
+    el.style.color = 'var(--dim)';
+    return;
+  }
+  var diff = Math.floor((Date.now() - new Date(lastIdleSince).getTime())/1000);
+  if(diff < 2 || !isFinite(diff) || diff < 0){
+    // During active hours the LLM is idle for fractions of a second
+    // between queries. Show a dash to avoid confusing flicker of 0.
+    el.textContent = '\u2014';
+    el.style.color = 'var(--dim)';
+    return;
+  }
+  var m = Math.floor(diff/60), s = diff%60;
+  if(m >= 60){
+    var h = Math.floor(m/60);
+    el.textContent = h+'h '+String(m%60).padStart(2,'0')+'m';
+    el.style.color = 'var(--red)';
+  }else if(m >= 5){
+    el.textContent = m+'m '+String(s).padStart(2,'0')+'s';
+    el.style.color = 'var(--yellow)';
+  }else{
+    el.textContent = m+'m '+String(s).padStart(2,'0')+'s';
     el.style.color = 'var(--dim)';
   }
 }
@@ -644,6 +682,10 @@ async function poll(){
     if(!isFinite(ver)) ver = 0;
 
     if(ver > 0){
+      // Always update idle_since on every successful poll (it changes independently of version).
+      lastIdleSince = typeof d.idle_since === 'string' ? d.idle_since : '';
+      updateIdleTimer();
+
       var isNew = (ver !== lastVersion);
       if(isNew){
         lastVersion  = ver;
@@ -700,6 +742,7 @@ document.addEventListener('visibilitychange', function(){
   if(document.visibilityState === 'visible'){
     ensureAudioCtx();
     updateTimer();
+    updateIdleTimer();
     // Re-assert sound state (AudioContext may have been suspended)
     if(lastData) updateSoundState(lastData);
     if(pollTimer !== null){ clearTimeout(pollTimer); pollTimer = null; }
@@ -711,6 +754,7 @@ window.addEventListener('pageshow', function(e){
   if(e.persisted){
     ensureAudioCtx();
     updateTimer();
+    updateIdleTimer();
     if(lastData) updateSoundState(lastData);
     if(pollTimer !== null){ clearTimeout(pollTimer); pollTimer = null; }
     schedulePoll(200);
@@ -722,8 +766,9 @@ window.addEventListener('pageshow', function(e){
 // ================================================================
 function startPolling(){
   if(timerHandle) clearInterval(timerHandle);
-  timerHandle = setInterval(updateTimer, 1000);
+  timerHandle = setInterval(function(){ updateTimer(); updateIdleTimer(); }, 1000);
   updateTimer();
+  updateIdleTimer();
   poll();
 }
 
