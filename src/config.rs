@@ -1,6 +1,27 @@
 use anyhow::{bail, Context, Result};
 use std::path::Path;
 
+/// Monitored news channel name patterns (substring match against channel title).
+/// Only channels whose title contains one of these substrings will be tracked.
+/// Everything else (TV shows, government services, etc.) is ignored.
+const NEWS_CHANNEL_PATTERNS: &[&str] = &[
+    "חדשות מתפרצות",
+    "חדשות בטחון",
+    "דניאל עמרם",
+    "צבי יחזקאלי",
+    "100שטח",
+    "חדשות 18",
+    "חדשות ישראל",
+    "אבו עלי",
+];
+
+/// Returns true if the channel title matches any monitored news channel pattern.
+pub fn is_monitored_channel(title: &str) -> bool {
+    NEWS_CHANNEL_PATTERNS
+        .iter()
+        .any(|pattern| title.contains(pattern))
+}
+
 /// All configuration for the application, loaded exclusively from environment variables.
 /// Every field is validated eagerly at startup — no silent fallbacks, no latent failures.
 /// If anything is wrong, we bail immediately with a specific, actionable error message.

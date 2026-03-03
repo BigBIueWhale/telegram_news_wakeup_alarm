@@ -1,7 +1,7 @@
 mod auth;
 
 use crate::buffer::{ChannelBuffers, ChannelMessage};
-use crate::config::Config;
+use crate::config::{self, Config};
 use anyhow::{Context, Result};
 use grammers_client::client::UpdatesConfiguration;
 use grammers_client::peer::Peer;
@@ -102,20 +102,22 @@ pub async fn run_listener(config: &Config, buffers: &ChannelBuffers, ready: Opti
         match dialog.peer() {
             Peer::Channel(channel) => {
                 channel_count += 1;
-                let channel_id = channel.id().bare_id().unwrap_or(0);
-                channels.push((
-                    dialog.peer_ref(),
-                    channel.title().to_string(),
-                    channel_id,
-                ));
+                let title = channel.title().to_string();
+                if config::is_monitored_channel(&title) {
+                    let channel_id = channel.id().bare_id().unwrap_or(0);
+                    channels.push((dialog.peer_ref(), title, channel_id));
+                } else {
+                    log::debug!("Skipping non-news channel: {}", title);
+                }
             }
             Peer::Group(_) => group_count += 1,
             _ => {}
         }
     }
     log::info!(
-        "Peer cache populated: {} broadcast channels, {} groups (monitoring channels only)",
+        "Peer cache populated: {} broadcast channels ({} monitored news), {} groups",
         channel_count,
+        channels.len(),
         group_count
     );
 
@@ -280,6 +282,13 @@ fn handle_update(update: Update, buffers: &ChannelBuffers) {
             // always be Some for channel messages. We silently skip None (shouldn't happen).
             match msg.peer() {
                 Some(Peer::Channel(channel)) => {
+                    let channel_title = channel.title().to_string();
+
+                    // Only process monitored news channels.
+                    if !config::is_monitored_channel(&channel_title) {
+                        return;
+                    }
+
                     let text = msg.text().to_string();
                     if text.is_empty() {
                         // Media-only message (photo, video, sticker, etc.) — skip.
@@ -293,11 +302,10 @@ fn handle_update(update: Update, buffers: &ChannelBuffers) {
                         log::error!(
                             "BUG: Channel '{}' returned None for bare_id() — \
                              this should never happen for Peer::Channel. Using 0 as fallback.",
-                            channel.title()
+                            channel_title
                         );
                         0
                     });
-                    let channel_title = channel.title().to_string();
 
                     log::debug!(
                         "[{}] {} (ch:{}): {} chars",
