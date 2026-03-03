@@ -451,8 +451,8 @@ var soundState      = 'silent';  // 'silent' | 'tick' | 'alarm'
 //
 //  Audio files:
 //
-//  alarm.mp3 — Generated from alarm.wav (boosted +19dB to near 0dB peak):
-//    ffmpeg -i alarm.wav -af "volume=19dB" -codec:a libmp3lame -b:a 128k alarm.mp3
+//  alarm.mp3 — Generated from alarm.wav (boosted +19dB, resampled to 44100Hz):
+//    ffmpeg -i alarm.wav -af "volume=19dB" -ar 44100 -codec:a libmp3lame -b:a 128k alarm.mp3
 //
 //  tick.mp3 — Generated programmatically:
 //    ffmpeg -f lavfi -i "aevalsrc='sin(800*2*PI*t)*exp(-8*t)':s=44100:d=0.25" \
@@ -464,8 +464,7 @@ var soundState      = 'silent';  // 'silent' | 'tick' | 'alarm'
 // ================================================================
 
 // Alarm state
-var alarmEl         = null;      // <audio> element (alarm.mp3, loop=true)
-var alarmReady      = false;     // true once canplaythrough fires
+var alarmTimer      = null;      // setInterval handle for repeating alarm
 var alarmRetryTimer = null;      // retry interval when play() is rejected
 
 // Tick state
@@ -479,49 +478,18 @@ var MEDIA_ERR_NAMES = {1:'ABORTED', 2:'NETWORK', 3:'DECODE', 4:'SRC_NOT_SUPPORTE
 // ================================================================
 
 function preloadAudio(){
-  // ── Alarm ──
-  console.log('[ALARM:LOAD] Pre-loading alarm.mp3');
+  // Both alarm and tick use fresh Audio() elements each time they play
+  // (the TV can't reliably reuse elements). Pre-loading just warms
+  // the browser cache so the first real play() is instant.
+  console.log('[PRELOAD] Warming cache for alarm.mp3 and tick.mp3');
   try{
-    alarmEl = new Audio('/alarm.mp3?v=2');
-    alarmEl.loop = true;
-    alarmEl.volume = 1.0;
-    alarmEl.preload = 'auto';
-    alarmEl.addEventListener('canplaythrough', function(){
-      if(!alarmReady){
-        alarmReady = true;
-        console.log('[ALARM:LOAD] alarm.mp3 ready');
-      }
-    });
-    alarmEl.addEventListener('error', function(){
-      var code = alarmEl.error ? alarmEl.error.code : '?';
-      var name = MEDIA_ERR_NAMES[code] || 'UNKNOWN';
-      console.error('[ALARM:LOAD] alarm.mp3 FAILED: MediaError ' + code + ' (' + name + ')');
-    });
-  }catch(e){
-    console.error('[ALARM:LOAD] Failed to create alarm Audio element:', e);
-  }
-
-  // ── Tick ──
-  // Pre-load so the first play() doesn't have network latency.
-  // Each tick creates a fresh Audio('/tick.mp3?v=2') because reusing
-  // one element with currentTime=0 is unreliable on smart TVs.
-  // The browser cache ensures this is instant after the first load.
-  console.log('[TICK:LOAD] Pre-loading tick.mp3');
+    var a = new Audio('/alarm.mp3?v=3');
+    a.preload = 'auto'; a.volume = 0;
+  }catch(e){}
   try{
-    var tickPreload = new Audio('/tick.mp3?v=2');
-    tickPreload.preload = 'auto';
-    tickPreload.volume = 0;
-    tickPreload.addEventListener('canplaythrough', function(){
-      console.log('[TICK:LOAD] tick.mp3 cached and ready');
-    });
-    tickPreload.addEventListener('error', function(){
-      var code = tickPreload.error ? tickPreload.error.code : '?';
-      var name = MEDIA_ERR_NAMES[code] || 'UNKNOWN';
-      console.error('[TICK:LOAD] tick.mp3 FAILED: MediaError ' + code + ' (' + name + ')');
-    });
-  }catch(e){
-    console.error('[TICK:LOAD] Failed to pre-load tick:', e);
-  }
+    var t = new Audio('/tick.mp3?v=2');
+    t.preload = 'auto'; t.volume = 0;
+  }catch(e){}
 }
 
 // ================================================================
@@ -534,64 +502,28 @@ function preloadAudio(){
 //  generated-audio fallback.
 // ================================================================
 
-function startAlarm(){
-  console.log('[ALARM] startAlarm: ready=' + alarmReady);
-  clearAlarmRetry();
-  attemptAlarmPlay();
-}
-
-function attemptAlarmPlay(){
-  if(soundState !== 'alarm') return; // stopped while we were waiting
-  if(!alarmReady || !alarmEl){
-    // Element not loaded yet — keep retrying
-    console.log('[ALARM] Not ready yet, will retry in 500ms');
-    scheduleAlarmRetry();
-    return;
-  }
-
+// Play one alarm burst using a fresh Audio element (same pattern as tick).
+// alarm.mp3 is ~0.8s; we repeat every 1s for continuous alarming.
+function playOneAlarm(){
   try{
-    alarmEl.currentTime = 0;
-    alarmEl.volume = 1.0;
-    var p = alarmEl.play();
-    if(p && typeof p.then === 'function'){
-      p.then(function(){
-        console.log('[ALARM] Playing');
-        clearAlarmRetry();
-      }).catch(function(e){
-        console.warn('[ALARM] play() rejected (autoplay policy?), retrying in 500ms:', e);
-        scheduleAlarmRetry();
-      });
-    }else{
-      // Old browser: synchronous play(), assume success
-      console.log('[ALARM] play() called (sync, old browser)');
-      clearAlarmRetry();
-    }
-  }catch(e){
-    console.error('[ALARM] play() threw, retrying in 500ms:', e);
-    scheduleAlarmRetry();
-  }
+    var a = new Audio('/alarm.mp3?v=3');
+    a.volume = 1.0;
+    var p = a.play();
+    if(p && typeof p.catch === 'function') p.catch(function(e){
+      console.warn('[ALARM] play() rejected:', e);
+    });
+  }catch(e){}
 }
 
-function scheduleAlarmRetry(){
-  if(alarmRetryTimer) return; // already scheduled
-  alarmRetryTimer = setInterval(function(){
-    if(soundState !== 'alarm'){
-      clearAlarmRetry();
-      return;
-    }
-    attemptAlarmPlay();
-  }, 500);
-}
-
-function clearAlarmRetry(){
-  if(alarmRetryTimer){ clearInterval(alarmRetryTimer); alarmRetryTimer = null; }
+function startAlarm(){
+  console.log('[ALARM] startAlarm');
+  stopAlarm();
+  playOneAlarm();
+  alarmTimer = setInterval(playOneAlarm, 1000);
 }
 
 function stopAlarm(){
-  clearAlarmRetry();
-  if(alarmEl){
-    try{ alarmEl.pause(); alarmEl.currentTime = 0; }catch(e){}
-  }
+  if(alarmTimer){ clearInterval(alarmTimer); alarmTimer = null; }
 }
 
 // ================================================================
@@ -681,43 +613,8 @@ function updateSoundState(data){
 window.unlock = function(){
   console.log('[UNLOCK] User tapped Enable Alerts');
 
-  // Pre-interact with alarm <audio> to satisfy autoplay policy.
-  // Play silently then immediately pause — this "unlocks" the
-  // element for future programmatic play() calls.
-  if(alarmEl){
-    try{
-      alarmEl.volume = 0;
-      var p = alarmEl.play();
-      if(p && typeof p.then === 'function'){
-        p.then(function(){
-          alarmEl.pause();
-          alarmEl.currentTime = 0;
-          alarmEl.volume = 1.0;
-          console.log('[UNLOCK] Alarm <audio> unlocked');
-        }).catch(function(e){
-          console.warn('[UNLOCK] Alarm pre-interact rejected:', e);
-          // Will retry when startAlarm is called
-        });
-      }else{
-        try{ alarmEl.pause(); alarmEl.currentTime = 0; alarmEl.volume = 1.0; }catch(e){}
-      }
-    }catch(e){
-      console.warn('[UNLOCK] Alarm pre-interact error:', e);
-    }
-  }else{
-    console.warn('[UNLOCK] No alarm element yet (still loading?)');
-  }
-
-  // Pre-interact with tick by playing one silently
-  try{
-    var t = new Audio('/tick.mp3?v=2');
-    t.volume = 0;
-    var pt = t.play();
-    if(pt && typeof pt.then === 'function'){
-      pt.then(function(){ t.pause(); console.log('[UNLOCK] Tick unlocked'); })
-        .catch(function(){});
-    }
-  }catch(e){}
+  // No pre-interact needed: we create fresh Audio elements each time,
+  // and the user gesture from this button click satisfies autoplay policy.
 
   audioUnlocked = true;
 
@@ -725,7 +622,7 @@ window.unlock = function(){
     document.getElementById('welcome').classList.add('hidden');
   }catch(e){}
 
-  console.log('[UNLOCK] Audio unlocked, alarmReady=' + alarmReady);
+  console.log('[UNLOCK] Audio unlocked');
 
   if(lastData) updateSoundState(lastData);
 };
