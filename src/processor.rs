@@ -26,19 +26,21 @@ const MIN_MESSAGES_TO_PROCESS: usize = 1;
 #[derive(Deserialize, Debug)]
 struct NewsOutput {
     updates: Vec<NewsItem>,
-    // Threat assessment booleans — the whole point of this alarm system.
+    // Threat assessment fields — the whole point of this alarm system.
+    // Non-empty string = active threat (5-word reason why).
+    // Empty string = no threat.
     #[serde(default)]
-    israel_attack_warning: bool,
+    israel_attack_warning: String,
     #[serde(default)]
-    israel_actual_red_alerts: bool,
+    israel_actual_red_alerts: String,
     #[serde(default)]
-    jerusalem_attack_warning: bool,
+    jerusalem_attack_warning: String,
     #[serde(default)]
-    jerusalem_actual_red_alerts: bool,
+    jerusalem_actual_red_alerts: String,
     #[serde(default)]
-    center_dan_or_yehuda_or_jerusalem_danger: bool,
+    center_dan_or_yehuda_or_jerusalem_danger: String,
     #[serde(default)]
-    evidence_for_jerusalem_or_center_or_yehuda_not_just_north_or_south: bool,
+    evidence_for_jerusalem_or_center_or_yehuda_not_just_north_or_south: String,
 }
 
 #[derive(Deserialize, Debug)]
@@ -414,12 +416,12 @@ fn build_prompt_text(
         r#"Respond with ONLY a JSON object in the exact format below. No other text before or after the JSON.
 
 {{
-  "israel_attack_warning": false,
-  "israel_actual_red_alerts": false,
-  "jerusalem_attack_warning": false,
-  "jerusalem_actual_red_alerts": false,
-  "center_dan_or_yehuda_or_jerusalem_danger": false,
-  "evidence_for_jerusalem_or_center_or_yehuda_not_just_north_or_south": false,
+  "israel_attack_warning": "",
+  "israel_actual_red_alerts": "",
+  "jerusalem_attack_warning": "",
+  "jerusalem_actual_red_alerts": "",
+  "center_dan_or_yehuda_or_jerusalem_danger": "",
+  "evidence_for_jerusalem_or_center_or_yehuda_not_just_north_or_south": "",
   "updates": [
     {{
       "channel": "channel name",
@@ -437,24 +439,30 @@ fn build_prompt_text(
   }}
 }}
 
-CRITICAL — THREAT ASSESSMENT BOOLEANS:
-The six boolean fields at the top are the PRIMARY PURPOSE of this system. They are used to wake someone sleeping in Jerusalem to reach a bomb shelter in time. Set them based on ANY evidence in the messages — even a single credible report is enough. These booleans must reflect IMMINENT, ACTIVE threats that warrant waking someone up RIGHT NOW to run to a shelter.
+CRITICAL — THREAT ASSESSMENT FIELDS:
+The six threat fields at the top are the PRIMARY PURPOSE of this system. They are used to wake someone sleeping in Jerusalem to reach a bomb shelter in time. Each field is a STRING, not a boolean:
+- When active (threat detected): provide EXACTLY 5 words explaining WHY this is active. This reason is displayed to the user so they immediately understand the situation when woken up.
+- When inactive (no threat): use an empty string "".
 
-ONCE A DANGER HAS PASSED, ALL BOOLEANS MUST RETURN TO FALSE. If messages describe an attack that already happened and is now over (e.g. "interceptions completed", "all clear given", "sirens ended 10 minutes ago"), set the booleans to FALSE. Past tense = FALSE. The booleans reflect CURRENT DANGER ONLY, not recent history.
+Set them based on ANY evidence in the messages — even a single credible report is enough. These fields must reflect IMMINENT, ACTIVE threats that warrant waking someone up RIGHT NOW to run to a shelter.
 
-- israel_attack_warning: TRUE if there is ANY early warning, intelligence, or credible report of an incoming or imminent attack on Israel (missiles, drones, rockets from Iran, Hezbollah, Yemen, etc.). Includes launch detections, military alerts, and "prepare for attack" announcements. Must be CURRENT — not past attacks or theoretical future threats.
-- israel_actual_red_alerts: TRUE if Pikud HaOref (Home Front Command) has activated actual red alert sirens ANYWHERE in Israel, or if credible sources report active sirens/interceptions RIGHT NOW.
-- jerusalem_attack_warning: TRUE if there is ANY warning or credible report specifically mentioning Jerusalem as a target or at-risk area. Also TRUE if merkaz/center Israel is targeted (missiles to merkaz pass directly over Jerusalem).
-- jerusalem_actual_red_alerts: TRUE if red alert sirens are active specifically in Jerusalem RIGHT NOW.
-- center_dan_or_yehuda_or_jerusalem_danger: TRUE if any of these areas are at IMMINENT risk: Gush Dan, Yehuda, Jerusalem, Merkaz (center Israel). Even if the target is Merkaz and not explicitly Jerusalem, set this TRUE because the flight path crosses over Jerusalem.
-- evidence_for_jerusalem_or_center_or_yehuda_not_just_north_or_south: THIS BOOLEAN TRIGGERS A LOUD ALARM THAT WAKES A SLEEPING PERSON. It requires CONFIRMED evidence that an attack is actually happening or confirmed launched toward central Israel — not speculation, not "might happen", not political tension. Early warning (10-15 min before impact) is GOOD and desired, but only if the attack is CONFIRMED (e.g. launches detected, missiles in the air, credible military sources confirm an ongoing strike). Set FALSE if: the danger has passed, the attack is over, only northern or southern areas are affected, or you are guessing/speculating without concrete reports. Set TRUE if: (a) credible sources confirm central Israel / Merkaz / Gush Dan / Tel Aviv / Jerusalem / Yehuda is under active attack or confirmed incoming strike, OR (b) a confirmed attack is underway with broad/unspecified targeting where center cannot be ruled out, OR (c) both north AND center are confirmed targeted simultaneously.
+ONCE A DANGER HAS PASSED, ALL FIELDS MUST RETURN TO EMPTY STRING "". If messages describe an attack that already happened and is now over (e.g. "interceptions completed", "all clear given", "sirens ended 10 minutes ago"), set the fields to "". Past tense = "". The fields reflect CURRENT DANGER ONLY, not recent history.
 
-IMPORTANT CONTEXT: Pikud HaOref often fails to give Jerusalem explicit early warning. By the time Jerusalem gets an actual siren (~1.5 min warning), Iranian missiles may already be overhead on their way to Merkaz. The user needs ~7 minutes from EARLY WARNING to reach shelter. Therefore: err on the side of TRUE for any boolean where there is reasonable doubt about an ACTIVE threat. A false positive (unnecessary wake-up) is infinitely better than a false negative (sleeping through an attack). But do NOT set booleans TRUE for past events, historical analysis, or speculative future threats — only for RIGHT NOW.
+- israel_attack_warning: Non-empty if there is ANY early warning, intelligence, or credible report of an incoming or imminent attack on Israel (missiles, drones, rockets from Iran, Hezbollah, Yemen, etc.). Includes launch detections, military alerts, and "prepare for attack" announcements. Must be CURRENT — not past attacks or theoretical future threats. Example: "Iran launched missiles toward Israel"
+- israel_actual_red_alerts: Non-empty if Pikud HaOref (Home Front Command) has activated actual red alert sirens ANYWHERE in Israel, or if credible sources report active sirens/interceptions RIGHT NOW. Example: "Red alert sirens across Israel"
+- jerusalem_attack_warning: Non-empty if there is ANY warning or credible report specifically mentioning Jerusalem as a target or at-risk area. Also non-empty if merkaz/center Israel is targeted (missiles to merkaz pass directly over Jerusalem). Example: "Missiles targeting center over Jerusalem"
+- jerusalem_actual_red_alerts: Non-empty if red alert sirens are active specifically in Jerusalem RIGHT NOW. Example: "Active sirens sounding in Jerusalem"
+- center_dan_or_yehuda_or_jerusalem_danger: Non-empty if any of these areas are at IMMINENT risk: Gush Dan, Yehuda, Jerusalem, Merkaz (center Israel). Even if the target is Merkaz and not explicitly Jerusalem, set this non-empty because the flight path crosses over Jerusalem. Example: "Missiles inbound to Gush Dan"
+- evidence_for_jerusalem_or_center_or_yehuda_not_just_north_or_south: THIS FIELD TRIGGERS A LOUD ALARM THAT WAKES A SLEEPING PERSON. It requires CONFIRMED evidence that an attack is actually happening or confirmed launched toward central Israel — not speculation, not "might happen", not political tension. Early warning (10-15 min before impact) is GOOD and desired, but only if the attack is CONFIRMED (e.g. launches detected, missiles in the air, credible military sources confirm an ongoing strike). Set "" if: the danger has passed, the attack is over, only northern or southern areas are affected, or you are guessing/speculating without concrete reports. Set non-empty if: (a) credible sources confirm central Israel / Merkaz / Gush Dan / Tel Aviv / Jerusalem / Yehuda is under active attack or confirmed incoming strike, OR (b) a confirmed attack is underway with broad/unspecified targeting where center cannot be ruled out, OR (c) both north AND center are confirmed targeted simultaneously. Example: "Confirmed strike heading toward center"
+
+IMPORTANT CONTEXT: Pikud HaOref often fails to give Jerusalem explicit early warning. By the time Jerusalem gets an actual siren (~1.5 min warning), Iranian missiles may already be overhead on their way to Merkaz. The user needs ~7 minutes from EARLY WARNING to reach shelter. Therefore: err on the side of a non-empty reason for any field where there is reasonable doubt about an ACTIVE threat. A false positive (unnecessary wake-up) is infinitely better than a false negative (sleeping through an attack). But do NOT set fields non-empty for past events, historical analysis, or speculative future threats — only for RIGHT NOW.
+
+IMPORTANT: An attack ON Israel does NOT mean Israel will attack back imminently. Do not conflate reports of Israeli offensive operations or retaliation plans with incoming threats to Israel. Only set fields non-empty when there is an incoming threat TO Israel, not outgoing attacks FROM Israel.
 
 Rules:
 - Respond ENTIRELY in English (the source messages may be in Hebrew, Arabic, or other languages — translate everything to English)
 - Include ONLY genuinely notable news updates from the last {focus_minutes} minutes
-- If nothing notable happened, return all booleans as false with empty updates array
+- If nothing notable happened, return all fields as "" with empty updates array
 - Be information-dense and incredibly brief in summaries
 - Categorize importance: critical (breaking/urgent), high (significant), medium (noteworthy), low (minor)
 - Output ONLY valid JSON, nothing else"#,
@@ -614,12 +622,13 @@ const BRIGHT_RED: &str = "\x1b[91m";
 const BRIGHT_GREEN: &str = "\x1b[92m";
 const BRIGHT_YELLOW: &str = "\x1b[93m";
 
-/// Format a single threat boolean as a colored line.
-fn fmt_threat_bool(label: &str, value: bool) -> String {
-    if value {
-        format!("  {BOLD}{BG_RED}{WHITE}  YES  {RESET}  {BOLD}{BRIGHT_RED}{label}{RESET}")
-    } else {
+/// Format a single threat field as a colored line.
+/// Non-empty reason = active threat, empty = no threat.
+fn fmt_threat(label: &str, reason: &str) -> String {
+    if reason.is_empty() {
         format!("  {DIM}{BRIGHT_GREEN}  no   {RESET}  {DIM}{label}{RESET}")
+    } else {
+        format!("  {BOLD}{BG_RED}{WHITE}  YES  {RESET}  {BOLD}{BRIGHT_RED}{label}{RESET}  {BOLD}{YELLOW}{reason}{RESET}")
     }
 }
 
@@ -644,12 +653,12 @@ fn process_and_print_output(raw_response: &str, web_state: &SharedWebState) {
 
     match serde_json::from_str::<NewsOutput>(json_str) {
         Ok(output) => {
-            let any_threat = output.israel_attack_warning
-                || output.israel_actual_red_alerts
-                || output.jerusalem_attack_warning
-                || output.jerusalem_actual_red_alerts
-                || output.center_dan_or_yehuda_or_jerusalem_danger
-                || output.evidence_for_jerusalem_or_center_or_yehuda_not_just_north_or_south;
+            let any_threat = !output.israel_attack_warning.is_empty()
+                || !output.israel_actual_red_alerts.is_empty()
+                || !output.jerusalem_attack_warning.is_empty()
+                || !output.jerusalem_actual_red_alerts.is_empty()
+                || !output.center_dan_or_yehuda_or_jerusalem_danger.is_empty()
+                || !output.evidence_for_jerusalem_or_center_or_yehuda_not_just_north_or_south.is_empty();
 
             let now = Utc::now().with_timezone(&TZ_JERUSALEM).format("%H:%M:%S");
 
@@ -667,12 +676,12 @@ fn process_and_print_output(raw_response: &str, web_state: &SharedWebState) {
             println!();
             println!("  {BOLD}{MAGENTA}Threat Assessment{RESET}");
             println!("  {DIM}─────────────────────────────────────────{RESET}");
-            println!("{}", fmt_threat_bool("Israel attack warning", output.israel_attack_warning));
-            println!("{}", fmt_threat_bool("Israel red alerts active", output.israel_actual_red_alerts));
-            println!("{}", fmt_threat_bool("Jerusalem attack warning", output.jerusalem_attack_warning));
-            println!("{}", fmt_threat_bool("Jerusalem red alerts active", output.jerusalem_actual_red_alerts));
-            println!("{}", fmt_threat_bool("Center/Dan/Yehuda/Jerusalem danger", output.center_dan_or_yehuda_or_jerusalem_danger));
-            println!("{}", fmt_threat_bool("Evidence for Jlem/Center/Yehuda (not just N/S)", output.evidence_for_jerusalem_or_center_or_yehuda_not_just_north_or_south));
+            println!("{}", fmt_threat("Israel attack warning", &output.israel_attack_warning));
+            println!("{}", fmt_threat("Israel red alerts active", &output.israel_actual_red_alerts));
+            println!("{}", fmt_threat("Jerusalem attack warning", &output.jerusalem_attack_warning));
+            println!("{}", fmt_threat("Jerusalem red alerts active", &output.jerusalem_actual_red_alerts));
+            println!("{}", fmt_threat("Center/Dan/Yehuda/Jerusalem danger", &output.center_dan_or_yehuda_or_jerusalem_danger));
+            println!("{}", fmt_threat("Evidence for Jlem/Center/Yehuda (not just N/S)", &output.evidence_for_jerusalem_or_center_or_yehuda_not_just_north_or_south));
             println!("  {DIM}─────────────────────────────────────────{RESET}");
             println!();
 
@@ -703,12 +712,12 @@ fn process_and_print_output(raw_response: &str, web_state: &SharedWebState) {
                 let mut ws = web_state.write().expect("web state lock poisoned");
                 ws.version += 1;
                 ws.timestamp = Utc::now().to_rfc3339();
-                ws.israel_attack_warning = output.israel_attack_warning;
-                ws.israel_actual_red_alerts = output.israel_actual_red_alerts;
-                ws.jerusalem_attack_warning = output.jerusalem_attack_warning;
-                ws.jerusalem_actual_red_alerts = output.jerusalem_actual_red_alerts;
-                ws.center_dan_or_yehuda_or_jerusalem_danger = output.center_dan_or_yehuda_or_jerusalem_danger;
-                ws.evidence_for_jerusalem_or_center_or_yehuda_not_just_north_or_south = output.evidence_for_jerusalem_or_center_or_yehuda_not_just_north_or_south;
+                ws.israel_attack_warning = output.israel_attack_warning.clone();
+                ws.israel_actual_red_alerts = output.israel_actual_red_alerts.clone();
+                ws.jerusalem_attack_warning = output.jerusalem_attack_warning.clone();
+                ws.jerusalem_actual_red_alerts = output.jerusalem_actual_red_alerts.clone();
+                ws.center_dan_or_yehuda_or_jerusalem_danger = output.center_dan_or_yehuda_or_jerusalem_danger.clone();
+                ws.evidence_for_jerusalem_or_center_or_yehuda_not_just_north_or_south = output.evidence_for_jerusalem_or_center_or_yehuda_not_just_north_or_south.clone();
                 ws.any_threat = any_threat;
                 ws.news = output.updates.iter().map(|it| WebNewsItem {
                     channel: it.channel.clone(),

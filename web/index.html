@@ -52,14 +52,18 @@ html,body{height:100%;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Ro
   animation:pulse 1.5s infinite}
 @keyframes pulse{0%,100%{box-shadow:0 0 0 0 rgba(248,81,73,0.4)}50%{box-shadow:0 0 20px 4px rgba(248,81,73,0.3)}}
 #threat-header{font-size:1.3rem;font-weight:700;margin-bottom:12px;text-align:center}
-.bool-row{display:flex;align-items:center;gap:10px;padding:5px 0;font-size:.9rem}
-.bool-badge{display:inline-block;min-width:3.2rem;text-align:center;padding:2px 8px;
-  border-radius:6px;font-weight:700;font-size:.8rem}
+.bool-row{display:grid;grid-template-columns:3.2rem 1fr;gap:8px;align-items:start;
+  padding:6px 0;font-size:.9rem;min-height:2.8rem}
+.bool-badge{text-align:center;padding:3px 8px;border-radius:6px;font-weight:700;
+  font-size:.8rem;line-height:1.4;align-self:center}
 .bool-badge.yes{background:var(--red);color:#fff}
 .bool-badge.no{background:#1a2a1a;color:var(--green);opacity:.5}
-.bool-label{flex:1}
+.bool-info{display:flex;flex-direction:column;gap:2px;justify-content:center}
+.bool-label{line-height:1.3}
 .bool-label.active{color:var(--red);font-weight:600}
 .bool-label.inactive{color:var(--dim)}
+.bool-reason{font-size:.8rem;font-weight:600;color:var(--yellow);line-height:1.3;
+  min-height:1.1rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 
 /* News cards */
 #news-section{margin-top:8px}
@@ -310,10 +314,12 @@ function ensureAudioCtx(){
 function updateSoundState(data){
   if(!audioUnlocked) return;
 
-  // Determine target state from booleans.
-  // Strict boolean checks — only `true` triggers; truthy strings/numbers do NOT.
+  // Determine target state from threat fields.
+  // evidence_for_... is now a string — non-empty triggers alarm.
+  // any_threat is still a boolean.
   var target;
-  if(data.evidence_for_jerusalem_or_center_or_yehuda_not_just_north_or_south === true){
+  var evidence = data.evidence_for_jerusalem_or_center_or_yehuda_not_just_north_or_south;
+  if(typeof evidence === 'string' && evidence.length > 0){
     target = 'alarm';
   }else if(data.any_threat === true){
     target = 'tick';
@@ -374,15 +380,17 @@ window.unlock = function(){
 //  persistent bar at the bottom of the screen. Nothing slides.
 // ================================================================
 
-var EXPECTED_BOOL_KEYS = [
+// Threat fields are now strings (non-empty = active reason, "" = inactive).
+var EXPECTED_THREAT_STRING_KEYS = [
   'israel_attack_warning',
   'israel_actual_red_alerts',
   'jerusalem_attack_warning',
   'jerusalem_actual_red_alerts',
   'center_dan_or_yehuda_or_jerusalem_danger',
-  'evidence_for_jerusalem_or_center_or_yehuda_not_just_north_or_south',
-  'any_threat'
+  'evidence_for_jerusalem_or_center_or_yehuda_not_just_north_or_south'
 ];
+// any_threat remains a boolean (computed server-side).
+var EXPECTED_BOOL_KEYS = ['any_threat'];
 
 var EXPECTED_NEWS_STRING_KEYS = [
   'channel', 'headline', 'importance', 'summary',
@@ -434,7 +442,17 @@ function validatePayload(d){
     errs.push('idle_since: expected string, got ' + typeof d.idle_since);
   }
 
-  // Boolean fields: every one must be present and actually boolean
+  // Threat string fields: every one must be present and a string
+  for(var i=0; i<EXPECTED_THREAT_STRING_KEYS.length; i++){
+    var tkey = EXPECTED_THREAT_STRING_KEYS[i];
+    if(!(tkey in d)){
+      errs.push(tkey + ': MISSING from payload');
+    }else if(typeof d[tkey] !== 'string'){
+      errs.push(tkey + ': expected string, got ' + typeof d[tkey] + ' (' + JSON.stringify(d[tkey]) + ')');
+    }
+  }
+
+  // Boolean fields (any_threat): must be present and actually boolean
   for(var i=0; i<EXPECTED_BOOL_KEYS.length; i++){
     var key = EXPECTED_BOOL_KEYS[i];
     if(!(key in d)){
@@ -573,11 +591,14 @@ function renderThreat(d){
   var html = '';
   for(var i=0; i<BOOLS.length; i++){
     var key=BOOLS[i][0], label=BOOLS[i][1];
-    // Strict: only true boolean counts, anything else is false
-    var v = d[key] === true;
-    html += '<div class="bool-row"><span class="bool-badge '+(v?'yes':'no')+'">'
-      +(v?'YES':'no')+'</span><span class="bool-label '
-      +(v?'active':'inactive')+'">'+label+'</span></div>';
+    // Threat fields are now strings: non-empty = active with reason.
+    var reason = typeof d[key] === 'string' ? d[key] : '';
+    var active = reason.length > 0;
+    html += '<div class="bool-row"><span class="bool-badge '+(active?'yes':'no')+'">'
+      +(active?'YES':'no')+'</span><div class="bool-info"><span class="bool-label '
+      +(active?'active':'inactive')+'">'+esc(label)+'</span>'
+      +'<span class="bool-reason">'+(active?esc(reason):'')+'</span>'
+      +'</div></div>';
   }
   bools.innerHTML = html;
 }

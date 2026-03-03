@@ -17,13 +17,14 @@ pub struct WebUpdate {
     pub version: u64,
     /// ISO-8601 timestamp of last LLM update.
     pub timestamp: String,
-    /// Threat assessment booleans.
-    pub israel_attack_warning: bool,
-    pub israel_actual_red_alerts: bool,
-    pub jerusalem_attack_warning: bool,
-    pub jerusalem_actual_red_alerts: bool,
-    pub center_dan_or_yehuda_or_jerusalem_danger: bool,
-    pub evidence_for_jerusalem_or_center_or_yehuda_not_just_north_or_south: bool,
+    /// Threat assessment fields.
+    /// Non-empty string = active threat (5-word reason why). Empty string = no threat.
+    pub israel_attack_warning: String,
+    pub israel_actual_red_alerts: String,
+    pub jerusalem_attack_warning: String,
+    pub jerusalem_actual_red_alerts: String,
+    pub center_dan_or_yehuda_or_jerusalem_danger: String,
+    pub evidence_for_jerusalem_or_center_or_yehuda_not_just_north_or_south: String,
     pub any_threat: bool,
     /// ISO-8601 timestamp of when the LLM became idle (waiting for new messages).
     /// Empty string means the LLM is currently processing.
