@@ -166,10 +166,10 @@ html,body{height:100%;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Ro
   <p>This dashboard monitors Telegram news channels for threat alerts. Tap below to enable sound alerts.</p>
   <button onclick="unlock()">Enable Alerts &amp; Enter</button>
   <div style="margin-top:2rem;display:flex;gap:12px;justify-content:center;flex-wrap:wrap">
-    <button onclick="testSound('alarm')" style="font-size:.9rem;padding:.5rem 1.2rem;border:none;border-radius:8px;
-      background:var(--red);color:#fff;cursor:pointer;font-weight:600">Test Alarm</button>
-    <button onclick="testSound('tick')" style="font-size:.9rem;padding:.5rem 1.2rem;border:none;border-radius:8px;
-      background:var(--yellow);color:#000;cursor:pointer;font-weight:600">Test Tick</button>
+    <button id="btn-test-alarm" onclick="testSound('alarm')" style="font-size:.9rem;padding:.5rem 1.2rem;border:3px solid transparent;border-radius:8px;
+      background:var(--red);color:#fff;cursor:pointer;font-weight:600;transition:all .15s">Test Alarm</button>
+    <button id="btn-test-tick" onclick="testSound('tick')" style="font-size:.9rem;padding:.5rem 1.2rem;border:3px solid transparent;border-radius:8px;
+      background:var(--yellow);color:#000;cursor:pointer;font-weight:600;transition:all .15s">Test Tick</button>
   </div>
 </div>
 
@@ -424,10 +424,10 @@ var lastChannelsUpdateTime = 0;
 //
 //    'alarm'  — ANY of the four Jerusalem/center fields is
 //               non-empty. Repeats alarm.mp3 at max volume
-//               with ALARM_GAP_MS silence between bursts.
+//               with a short silence gap between bursts.
 //
 //    'tick'   — any OTHER threat boolean is TRUE. Soft periodic
-//               click every TICK_PERIOD_MS. "Something is happening."
+//               click every ~1s. "Something is happening."
 //
 //    'silent' — all booleans FALSE. No sound.
 //
@@ -453,11 +453,14 @@ var soundState      = 'silent';  // 'silent' | 'tick' | 'alarm'
 //  reporting state=running. <audio> elements are the only reliable
 //  cross-device path (phones, desktops, and smart TVs).
 //
-//  TIMING: Uses onended-driven setTimeout chains, NOT setInterval.
-//  setInterval fires at wall-clock intervals regardless of whether
-//  the previous Audio element finished, causing drift, bunching,
-//  and overlaps. The onended approach guarantees: exactly one sound
-//  plays at a time, uniform pacing, and proper element cleanup.
+//  DOUBLE-BUFFERED PLAYBACK (SoundLoop):
+//  new Audio(url) must re-decode the MP3 into PCM every time, even
+//  from cache. On slow smart TV CPUs this decode takes 50-200ms
+//  with high variance, causing non-uniform pacing.
+//
+//  Fix: while the current element is playing, pre-create the NEXT
+//  element and let it decode in the background. By the time onended
+//  fires, the next element is already decoded and .play() is instant.
 //
 //  Audio files:
 //
@@ -473,42 +476,162 @@ var soundState      = 'silent';  // 'silent' | 'tick' | 'alarm'
 //  available instantly, even in a bomb shelter with no internet.
 // ================================================================
 
-// Alarm state
-var alarmActive    = false;      // master flag: should alarm be sounding?
-var alarmEl        = null;       // the currently-playing Audio element
-var alarmNextTimer = null;       // setTimeout handle for the next burst
-
-// Tick state
-var tickActive     = false;      // master flag: should tick be sounding?
-var tickEl         = null;       // the currently-playing Audio element
-var tickNextTimer  = null;       // setTimeout handle for the next tick
-
-// Timing constants
-var ALARM_GAP_MS   = 200;       // silence between alarm bursts
-var ALARM_MAX_MS   = 3000;      // safety timeout if onended never fires
-var TICK_PERIOD_MS = 1000;      // target tick-to-tick interval
-var TICK_MAX_MS    = 3000;      // safety timeout if onended never fires
-
 // ================================================================
-//  SHARED: clean up an Audio element (release resources)
+//  SoundLoop — double-buffered repeating audio abstraction
+//
+//  Usage:
+//    var loop = new SoundLoop('/tick.mp3', 1000);  // fixed 1s period
+//    var loop = new SoundLoop('/alarm.mp3', 0);    // auto-duration (back-to-back)
+//    loop.start();  // begins looping immediately
+//    loop.stop();   // stops instantly, cleans up both elements
+//
+//  Period modes:
+//    period > 0  — fixed-interval setTimeout chain (e.g. tick every 1s)
+//    period === 0 — auto-duration: next cycle fires at clip duration + 50ms,
+//                   producing urgent back-to-back playback (alarm)
+//
+//  Does NOT rely on onended (which silently never fires on some
+//  smart TVs and mobile browsers). This guarantees:
+//    - Exactly one Audio element plays at any time (no overlaps)
+//    - Uniform pacing regardless of browser quirks
+//    - Instant stop: .stop() kills everything synchronously
+//    - TV-safe: fresh elements, ES5, no Web Audio API
 // ================================================================
 
-function releaseAudio(el){
+function SoundLoop(url, periodMs){
+  this._url = url;
+  this._period = periodMs;
+  this._running = false;
+  this._playing = null;   // currently-playing Audio element
+  this._next = null;       // pre-created next Audio element (decoding)
+  this._timer = null;      // setTimeout for next cycle
+}
+
+// Detach an Audio element — unhook callbacks, drop reference, let it
+// finish playing naturally and get garbage-collected.
+SoundLoop.prototype._detach = function(el){
+  if(!el) return;
+  try{ el.onended = null; }catch(e){}
+  try{ el.onerror = null; }catch(e){}
+};
+
+// Hard-stop an Audio element — pause, clear src, free resources.
+// Used only by .stop() for immediate silence.
+SoundLoop.prototype._kill = function(el){
   if(!el) return;
   try{ el.onended = null; }catch(e){}
   try{ el.onerror = null; }catch(e){}
   try{ el.pause(); }catch(e){}
   try{ el.src = ''; }catch(e){}
-}
+};
+
+// Pre-create the next Audio element so it decodes in the background.
+// Called immediately after play() — the entire _period is available
+// for decoding, so by next cycle the element is ready.
+SoundLoop.prototype._prepareNext = function(){
+  if(!this._running || this._next) return;
+  try{
+    var el = new Audio(this._url);
+    el.preload = 'auto';
+    el.volume = 1.0;
+    this._next = el;
+  }catch(e){}
+};
+
+// Core: release previous, play pre-decoded next, schedule next cycle.
+//
+// Period modes:
+//   period > 0  — fixed-interval scheduling (tick: exactly 1000ms apart)
+//   period === 0 — auto-duration: schedule next cycle at clip duration + 50ms
+//                  gap, producing urgent back-to-back playback (alarm)
+SoundLoop.prototype._cycle = function(){
+  this._timer = null;
+
+  // Let the previous element finish playing naturally (no clipping).
+  // Just drop the reference — it will GC after playback ends.
+  this._detach(this._playing);
+  this._playing = null;
+
+  if(!this._running) return;
+
+  // Grab the pre-decoded element, or create a fresh one
+  var el = this._next;
+  this._next = null;
+  if(!el){
+    try{ el = new Audio(this._url); }catch(e){}
+  }
+  if(!el){
+    // Element creation failed — retry next cycle
+    var self = this;
+    this._timer = setTimeout(function(){ self._cycle(); }, this._period || 1000);
+    return;
+  }
+
+  el.volume = 1.0;
+  this._playing = el;
+
+  // Start pre-decoding the NEXT element now (has full period to decode)
+  this._prepareNext();
+
+  // Play (fire-and-forget — timing is driven by setTimeout, not onended)
+  try{
+    var p = el.play();
+    if(p && typeof p.catch === 'function') p.catch(function(e){
+      console.warn('[SoundLoop] play() rejected:', e);
+    });
+  }catch(e){}
+
+  // Compute delay for next cycle
+  var delay = this._period;
+  if(delay === 0){
+    // Auto-duration: use measured clip length + 50ms gap
+    var dur = el.duration;
+    if(dur && isFinite(dur) && dur > 0){
+      delay = Math.ceil(dur * 1000) + 50;
+    } else {
+      delay = 1000; // fallback until duration metadata is available
+    }
+  }
+
+  var self = this;
+  this._timer = setTimeout(function(){ self._cycle(); }, delay);
+};
+
+SoundLoop.prototype.start = function(){
+  if(this._running) return;
+  this._running = true;
+  this._cycle();
+};
+
+SoundLoop.prototype.stop = function(){
+  this._running = false;
+  if(this._timer){ clearTimeout(this._timer); this._timer = null; }
+  this._kill(this._playing);
+  this._playing = null;
+  this._kill(this._next);
+  this._next = null;
+};
+
+// ================================================================
+//  Alarm and Tick loop instances
+//
+//  alarm: period=0 → auto-duration (back-to-back, urgent, ~50ms gap)
+//  tick:  period=1000ms (tick.mp3 is ~0.25s → ~0.75s silence gap)
+// ================================================================
+
+var alarmLoop = new SoundLoop('/alarm.mp3?v=3', 0);
+var tickLoop  = new SoundLoop('/tick.mp3?v=2', 1000);
+
+function startAlarm(){ console.log('[ALARM] start'); alarmLoop.start(); }
+function stopAlarm(){  alarmLoop.stop(); }
+function startTick(){  tickLoop.start(); }
+function stopTick(){   tickLoop.stop(); }
 
 // ================================================================
 //  PRE-LOAD AUDIO AT PAGE LOAD
 // ================================================================
 
 function preloadAudio(){
-  // Both alarm and tick use fresh Audio() elements each time they play
-  // (the TV can't reliably reuse elements). Pre-loading just warms
-  // the browser cache so the first real play() is instant.
   console.log('[PRELOAD] Warming cache for alarm.mp3 and tick.mp3');
   try{
     var a = new Audio('/alarm.mp3?v=3');
@@ -518,144 +641,6 @@ function preloadAudio(){
     var t = new Audio('/tick.mp3?v=2');
     t.preload = 'auto'; t.volume = 0;
   }catch(e){}
-}
-
-// ================================================================
-//  ALARM — start / stop
-//
-//  Each burst: create fresh Audio, play it, wait for onended,
-//  pause + release old element, wait ALARM_GAP_MS, repeat.
-//  A safety timeout fires if onended doesn't (TV quirk, decode
-//  error, etc). play() rejection retries on the next cycle.
-//  Exactly one Audio element exists at any time.
-// ================================================================
-
-function playOneAlarm(){
-  alarmNextTimer = null;
-
-  // Clean up previous element before creating a new one
-  releaseAudio(alarmEl);
-  alarmEl = null;
-
-  if(!alarmActive) return;
-
-  try{
-    var a = new Audio('/alarm.mp3?v=3');
-    a.volume = 1.0;
-    alarmEl = a;
-
-    // Guard: only schedule next once per cycle
-    var handled = false;
-    function onDone(){
-      if(handled) return;
-      handled = true;
-      releaseAudio(a);
-      if(a === alarmEl) alarmEl = null;
-      if(alarmActive){
-        alarmNextTimer = setTimeout(playOneAlarm, ALARM_GAP_MS);
-      }
-    }
-
-    a.onended = onDone;
-    a.onerror = onDone;
-
-    // Safety: if onended never fires, force next cycle
-    setTimeout(onDone, ALARM_MAX_MS);
-
-    var p = a.play();
-    if(p && typeof p.catch === 'function') p.catch(function(e){
-      console.warn('[ALARM] play() rejected:', e);
-      // Still cycle — will retry on next iteration
-      onDone();
-    });
-  }catch(e){
-    if(alarmActive){
-      alarmNextTimer = setTimeout(playOneAlarm, 1000);
-    }
-  }
-}
-
-function startAlarm(){
-  console.log('[ALARM] startAlarm');
-  stopAlarm();
-  alarmActive = true;
-  playOneAlarm();
-}
-
-function stopAlarm(){
-  alarmActive = false;
-  if(alarmNextTimer){ clearTimeout(alarmNextTimer); alarmNextTimer = null; }
-  releaseAudio(alarmEl);
-  alarmEl = null;
-}
-
-// ================================================================
-//  TICK — start / stop
-//
-//  Same onended-driven pattern as alarm. tick.mp3 is ~250ms;
-//  after onended we wait (TICK_PERIOD_MS - elapsed) to maintain
-//  a uniform 1s tick-to-tick cadence. If the sound takes longer
-//  than TICK_PERIOD_MS (shouldn't happen), the next tick fires
-//  immediately with no overlap.
-// ================================================================
-
-function playOneTick(){
-  tickNextTimer = null;
-
-  releaseAudio(tickEl);
-  tickEl = null;
-
-  if(!tickActive) return;
-
-  var t0 = Date.now();
-
-  try{
-    var t = new Audio('/tick.mp3?v=2');
-    t.volume = 1.0;
-    tickEl = t;
-
-    var handled = false;
-    function onDone(){
-      if(handled) return;
-      handled = true;
-      releaseAudio(t);
-      if(t === tickEl) tickEl = null;
-      if(tickActive){
-        // Wait remaining time to hit TICK_PERIOD_MS total cycle
-        var elapsed = Date.now() - t0;
-        var gap = TICK_PERIOD_MS - elapsed;
-        if(gap < 50) gap = 50; // minimum gap to avoid bunching
-        tickNextTimer = setTimeout(playOneTick, gap);
-      }
-    }
-
-    t.onended = onDone;
-    t.onerror = onDone;
-
-    setTimeout(onDone, TICK_MAX_MS);
-
-    var p = t.play();
-    if(p && typeof p.catch === 'function') p.catch(function(){
-      onDone();
-    });
-  }catch(e){
-    if(tickActive){
-      tickNextTimer = setTimeout(playOneTick, 1000);
-    }
-  }
-}
-
-function startTick(){
-  if(tickActive) return;
-  tickActive = true;
-  playOneTick();
-}
-
-function stopTick(){
-  tickActive = false;
-  if(tickNextTimer){ clearTimeout(tickNextTimer); tickNextTimer = null; }
-  releaseAudio(tickEl);
-  tickEl = null;
 }
 
 // ================================================================
@@ -716,41 +701,84 @@ function updateSoundState(data){
 
 window.unlock = function(){
   console.log('[UNLOCK] User tapped Enable Alerts');
-
-  // No pre-interact needed: we create fresh Audio elements each time,
-  // and the user gesture from this button click satisfies autoplay policy.
-
   audioUnlocked = true;
-
   try{
     document.getElementById('welcome').classList.add('hidden');
   }catch(e){}
-
   console.log('[UNLOCK] Audio unlocked');
-
   if(lastData) updateSoundState(lastData);
 };
 
 // ================================================================
 //  TEST SOUND (from welcome screen)
+//
+//  Toggle behavior: first press starts the loop, second press
+//  stops it. Buttons visually pulse while their sound is active.
+//  Pressing one button while the other is active stops the other.
 // ================================================================
 
-var testSoundTimer = null;
 var testMode = false;
+var testWhich = null;      // 'alarm' | 'tick' | null
+var testWasUnlocked = false;
+
+function testStop(){
+  stopAlarm();
+  stopTick();
+  soundState = 'silent';
+  testMode = false;
+  testWhich = null;
+  audioUnlocked = testWasUnlocked;
+  updateTestButtons();
+  // Re-evaluate real data so a real alarm isn't silenced by test ending
+  if(audioUnlocked && lastData){
+    updateSoundState(lastData);
+  }
+}
+
+function updateTestButtons(){
+  var btnA = document.getElementById('btn-test-alarm');
+  var btnT = document.getElementById('btn-test-tick');
+  if(!btnA || !btnT) return;
+
+  if(testWhich === 'alarm'){
+    btnA.style.borderColor = '#fff';
+    btnA.style.boxShadow = '0 0 12px var(--red)';
+    btnA.textContent = 'Stop Alarm';
+  }else{
+    btnA.style.borderColor = 'transparent';
+    btnA.style.boxShadow = 'none';
+    btnA.textContent = 'Test Alarm';
+  }
+
+  if(testWhich === 'tick'){
+    btnT.style.borderColor = '#fff';
+    btnT.style.boxShadow = '0 0 12px var(--yellow)';
+    btnT.textContent = 'Stop Tick';
+  }else{
+    btnT.style.borderColor = 'transparent';
+    btnT.style.boxShadow = 'none';
+    btnT.textContent = 'Test Tick';
+  }
+}
 
 window.testSound = function(which){
-  console.log('[TEST] Testing: ' + which);
+  // If tapping the same button that's already active: stop
+  if(testMode && testWhich === which){
+    console.log('[TEST] Stopping: ' + which);
+    testStop();
+    return;
+  }
 
-  // If already testing, clean up the previous test first
-  if(testSoundTimer){ clearTimeout(testSoundTimer); testSoundTimer = null; }
-  try{ stopAlarm(); }catch(e){}
-  try{ stopTick(); }catch(e){}
+  // If switching from one test to another, or starting fresh
+  console.log('[TEST] Starting: ' + which);
+  stopAlarm();
+  stopTick();
 
-  // Enter test mode: blocks updateSoundState from interfering
+  testWasUnlocked = testMode ? testWasUnlocked : audioUnlocked;
   testMode = true;
-  var wasUnlocked = audioUnlocked;
   audioUnlocked = true;
-  soundState = 'silent'; // clean baseline so startAlarm/startTick transition properly
+  soundState = 'silent';
+  testWhich = which;
 
   if(which === 'alarm'){
     soundState = 'alarm';
@@ -760,20 +788,7 @@ window.testSound = function(which){
     startTick();
   }
 
-  testSoundTimer = setTimeout(function(){
-    console.log('[TEST] Auto-stop after 3s');
-    try{ stopAlarm(); }catch(e){}
-    try{ stopTick(); }catch(e){}
-    soundState = 'silent';
-    testMode = false;
-    audioUnlocked = wasUnlocked;
-    testSoundTimer = null;
-
-    // Re-evaluate real data so a real alarm isn't silenced by the test ending
-    if(audioUnlocked && lastData){
-      updateSoundState(lastData);
-    }
-  }, 3000);
+  updateTestButtons();
 };
 
 // ================================================================
