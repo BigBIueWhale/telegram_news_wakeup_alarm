@@ -3,9 +3,11 @@ use crate::ollama::OllamaClient;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use serde::Deserialize;
+use std::collections::VecDeque;
 use std::fmt::Write as _;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokenizers::Tokenizer;
+use tokio_util::sync::CancellationToken;
 
 /// Maximum token budget for the LLM prompt (must stay strictly LESS than this).
 const MAX_TOKENS: usize = 50_000;
@@ -32,7 +34,30 @@ struct NewsItem {
     summary: String,
 }
 
-/// The main LLM processing loop. Runs forever (until the task is cancelled):
+/// Format a Duration into a human-readable string.
+/// Examples: "0.3s", "2.3s", "42s", "1m 12s"
+fn format_duration(d: Duration) -> String {
+    let total_secs = d.as_secs();
+    let millis = d.subsec_millis();
+
+    if total_secs == 0 {
+        return format!("0.{}s", millis / 100);
+    }
+    if total_secs < 10 {
+        return format!("{}.{}s", total_secs, millis / 100);
+    }
+    if total_secs < 60 {
+        return format!("{}s", total_secs);
+    }
+    let minutes = total_secs / 60;
+    let secs = total_secs % 60;
+    format!("{}m {}s", minutes, secs)
+}
+
+/// Maximum number of iteration timestamps to track for rolling average.
+const FREQUENCY_WINDOW: usize = 10;
+
+/// The main LLM processing loop. Runs until the shutdown token is cancelled:
 ///   1. Snapshot all channel buffers
 ///   2. Binary-search for the optimal time window that maximizes context under 50k tokens
 ///   3. Build the prompt with uniform per-channel history
@@ -43,41 +68,131 @@ pub async fn run_loop(
     buffers: ChannelBuffers,
     tokenizer: Tokenizer,
     ollama: OllamaClient,
+    shutdown: CancellationToken,
 ) -> Result<()> {
     let mut consecutive_errors: u32 = 0;
+    // Track timestamps of productive iterations for rolling average interval.
+    let mut iteration_times: VecDeque<Instant> = VecDeque::with_capacity(FREQUENCY_WINDOW + 1);
 
     loop {
+        if shutdown.is_cancelled() {
+            log::info!("[processor] Shutdown signal received — exiting");
+            return Ok(());
+        }
+
+        // Step 1: Snapshot buffers
+        log::info!("[processor] Snapshotting channel buffers...");
+        let step_start = Instant::now();
         let snapshot = buffers.snapshot();
+        log::info!(
+            "[processor] Snapshot complete ({}) — {} channels",
+            format_duration(step_start.elapsed()),
+            snapshot.len()
+        );
 
         // Wait if no messages have arrived yet.
         if snapshot.is_empty() {
-            tokio::time::sleep(Duration::from_secs(5)).await;
+            log::info!("[processor] No messages yet — waiting 5s...");
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_secs(5)) => {}
+                _ = shutdown.cancelled() => {
+                    log::info!("[processor] Shutdown signal received — exiting");
+                    return Ok(());
+                }
+            }
             continue;
         }
 
         let total_msgs: usize = snapshot.iter().map(|s| s.messages.len()).sum();
         if total_msgs < MIN_MESSAGES_TO_PROCESS {
-            tokio::time::sleep(Duration::from_secs(5)).await;
+            log::info!(
+                "[processor] Only {} messages (need {}) — waiting 5s...",
+                total_msgs, MIN_MESSAGES_TO_PROCESS
+            );
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_secs(5)) => {}
+                _ = shutdown.cancelled() => {
+                    log::info!("[processor] Shutdown signal received — exiting");
+                    return Ok(());
+                }
+            }
             continue;
         }
 
-        // Build a token-budgeted prompt via binary search on time window.
+        // Track iteration frequency (only for productive iterations).
+        let now_instant = Instant::now();
+        iteration_times.push_back(now_instant);
+        if iteration_times.len() > FREQUENCY_WINDOW + 1 {
+            iteration_times.pop_front();
+        }
+        if iteration_times.len() >= 2 {
+            let first = *iteration_times.front().unwrap();
+            let last = *iteration_times.back().unwrap();
+            let total_elapsed = last.duration_since(first);
+            let intervals = (iteration_times.len() - 1) as u32;
+            let avg = total_elapsed / intervals;
+            log::info!(
+                "[processor] Average update interval: {} (over last {} runs)",
+                format_duration(avg),
+                intervals
+            );
+        }
+
+        // Step 2: Build token-budgeted prompt
+        log::info!(
+            "[processor] Building token-budgeted prompt ({} channels, {} messages)...",
+            snapshot.len(),
+            total_msgs
+        );
+        let step_start = Instant::now();
+
         match build_budgeted_prompt(&snapshot, &tokenizer) {
             Ok((prompt, window_minutes, token_count)) => {
                 log::info!(
-                    "Querying LLM: {} channels, {} messages, {}min context window, ~{} tokens",
-                    snapshot.len(),
-                    total_msgs,
+                    "[processor] Prompt built ({}): {}min window, ~{} tokens",
+                    format_duration(step_start.elapsed()),
                     window_minutes,
                     token_count,
                 );
 
-                match ollama.query(&prompt).await {
-                    Ok(response) => {
-                        consecutive_errors = 0;
-                        process_and_print_output(&response);
+                // Step 3: Query LLM
+                log::info!(
+                    "[processor] Querying Ollama ('{}')...",
+                    ollama.model_name()
+                );
+                let step_start = Instant::now();
+
+                let query_result = tokio::select! {
+                    result = ollama.query(&prompt) => Some(result),
+                    _ = shutdown.cancelled() => None,
+                };
+
+                match query_result {
+                    None => {
+                        log::info!("[processor] Shutdown signal received during LLM query — exiting");
+                        return Ok(());
                     }
-                    Err(e) => {
+                    Some(Ok(response)) => {
+                        log::info!(
+                            "[processor] LLM response received ({})",
+                            format_duration(step_start.elapsed())
+                        );
+                        consecutive_errors = 0;
+
+                        // Step 4: Parse and display output
+                        log::info!("[processor] Parsing LLM response...");
+                        let step_start = Instant::now();
+                        process_and_print_output(&response);
+                        log::info!(
+                            "[processor] Output processed ({})",
+                            format_duration(step_start.elapsed())
+                        );
+                    }
+                    Some(Err(e)) => {
+                        log::info!(
+                            "[processor] LLM query failed after {}",
+                            format_duration(step_start.elapsed())
+                        );
                         consecutive_errors += 1;
                         let delay_secs = (consecutive_errors as u64 * 5).min(60);
                         log::error!(
@@ -86,13 +201,25 @@ pub async fn run_loop(
                             e,
                             delay_secs
                         );
-                        tokio::time::sleep(Duration::from_secs(delay_secs)).await;
+                        tokio::select! {
+                            _ = tokio::time::sleep(Duration::from_secs(delay_secs)) => {}
+                            _ = shutdown.cancelled() => {
+                                log::info!("[processor] Shutdown signal received — exiting");
+                                return Ok(());
+                            }
+                        }
                     }
                 }
             }
             Err(e) => {
-                log::error!("Failed to build LLM prompt: {:#}", e);
-                tokio::time::sleep(Duration::from_secs(10)).await;
+                log::error!("[processor] Failed to build prompt ({}): {:#}", format_duration(step_start.elapsed()), e);
+                tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_secs(10)) => {}
+                    _ = shutdown.cancelled() => {
+                        log::info!("[processor] Shutdown signal received — exiting");
+                        return Ok(());
+                    }
+                }
             }
         }
     }

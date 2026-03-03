@@ -66,6 +66,71 @@ impl OllamaClient {
         }
     }
 
+    /// Returns the configured model name (for logging).
+    pub fn model_name(&self) -> &str {
+        &self.model
+    }
+
+    /// Verify that Ollama is reachable and the configured model is available.
+    /// Hits the `/api/tags` endpoint (lightweight, no GPU usage).
+    /// Returns Ok(()) if reachable, Err with actionable message if not.
+    pub async fn check_reachable(&self) -> Result<()> {
+        let tags_url = self.endpoint.replace("/api/chat", "/api/tags");
+
+        let response = self
+            .http
+            .get(&tags_url)
+            .timeout(std::time::Duration::from_secs(10))
+            .send()
+            .await
+            .with_context(|| {
+                format!(
+                    "cannot reach Ollama at '{}' — is Ollama running? \
+                     (start it with: ollama serve)",
+                    tags_url
+                )
+            })?;
+
+        if !response.status().is_success() {
+            anyhow::bail!(
+                "Ollama returned HTTP {} from '{}' — expected 200. \
+                 Is this a valid Ollama instance?",
+                response.status(),
+                tags_url
+            );
+        }
+
+        #[derive(Deserialize)]
+        struct TagsResponse {
+            models: Vec<ModelInfo>,
+        }
+        #[derive(Deserialize)]
+        struct ModelInfo {
+            name: String,
+        }
+
+        let tags: TagsResponse = response.json().await.with_context(|| {
+            format!("failed to parse Ollama /api/tags response from '{}'", tags_url)
+        })?;
+
+        let model_found = tags.models.iter().any(|m| {
+            m.name == self.model || m.name.starts_with(&format!("{}:", self.model))
+        });
+
+        if !model_found {
+            let available: Vec<&str> = tags.models.iter().map(|m| m.name.as_str()).collect();
+            anyhow::bail!(
+                "Ollama is running but model '{}' is not loaded. \
+                 Available models: {:?}. Pull it with: ollama pull {}",
+                self.model,
+                available,
+                self.model
+            );
+        }
+
+        Ok(())
+    }
+
     /// Send a prompt to the LLM and collect the full streamed response.
     ///
     /// Uses streaming mode for lower perceived latency and better error detection

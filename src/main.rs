@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use std::time::Duration;
 use telegram_news_alarm::{buffer::ChannelBuffers, config::Config, ollama::OllamaClient, processor, telegram};
+use tokio_util::sync::CancellationToken;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -32,19 +33,31 @@ async fn main() -> Result<()> {
     // Shared channel message buffers: written by Telegram listener, read by LLM processor.
     let buffers = ChannelBuffers::new();
 
-    // Create the Ollama client (validates URL format, actual connectivity checked on first query).
+    // Create the Ollama client and verify connectivity before starting anything else.
     let ollama = OllamaClient::new(config.ollama_url.clone(), config.ollama_model.clone());
     log::info!(
-        "Ollama client configured: model='{}', endpoint='{}/api/chat'",
+        "Checking Ollama connectivity (model='{}', endpoint='{}/api/chat')...",
         config.ollama_model,
         config.ollama_url
     );
+    ollama.check_reachable().await.context(
+        "Ollama reachability check failed at startup — \
+         the LLM backend must be running before the application starts"
+    )?;
+    log::info!(
+        "Ollama is reachable and model '{}' is available",
+        config.ollama_model
+    );
+
+    // Shared shutdown signal: cancelled when the Telegram listener exits (Ctrl+C or fatal error).
+    let shutdown = CancellationToken::new();
 
     // Spawn the LLM processing loop as a background task.
     // It will wait for messages to arrive before its first query.
     let processor_buffers = buffers.clone();
+    let processor_shutdown = shutdown.clone();
     let processor_handle = tokio::spawn(async move {
-        processor::run_loop(processor_buffers, tokenizer, ollama).await
+        processor::run_loop(processor_buffers, tokenizer, ollama, processor_shutdown).await
     });
 
     // Run the Telegram listener with automatic reconnection on failure.
@@ -80,13 +93,18 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Shut down the LLM processor task.
-    log::info!("Stopping LLM processor...");
-    processor_handle.abort();
-    match processor_handle.await {
-        Ok(Ok(())) => log::info!("LLM processor stopped cleanly"),
-        Ok(Err(e)) => log::warn!("LLM processor reported error during shutdown: {:#}", e),
-        Err(_) => log::debug!("LLM processor task cancelled (expected)"),
+    // Gracefully shut down the LLM processor task.
+    log::info!("Signaling LLM processor to shut down...");
+    shutdown.cancel();
+    let mut processor_handle = processor_handle;
+    match tokio::time::timeout(Duration::from_secs(30), &mut processor_handle).await {
+        Ok(Ok(Ok(()))) => log::info!("LLM processor stopped cleanly"),
+        Ok(Ok(Err(e))) => log::warn!("LLM processor reported error during shutdown: {:#}", e),
+        Ok(Err(e)) => log::warn!("LLM processor task panicked during shutdown: {:?}", e),
+        Err(_) => {
+            log::warn!("LLM processor did not stop within 30s — aborting");
+            processor_handle.abort();
+        }
     }
 
     log::info!("Shutdown complete");
