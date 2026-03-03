@@ -182,9 +182,9 @@ var everHadData    = false;
 //
 //  Three mutually-exclusive sound states, driven by booleans:
 //
-//    'alarm'  — confirmed_center_attack_not_just_north_south
-//               is TRUE. alarm.wav loops at max volume until it
-//               goes FALSE. This is the wake-up-or-die sound.
+//    'alarm'  — ANY of the four Jerusalem/center fields is
+//               non-empty. alarm.wav loops at max volume until
+//               all four go empty. This is the wake-up sound.
 //
 //    'tick'   — any OTHER threat boolean is TRUE (but not the
 //               evidence one). A soft periodic tick every 1s.
@@ -339,8 +339,14 @@ function updateSoundState(data){
   // evidence_for_... is now a string — non-empty triggers alarm.
   // any_threat is still a boolean.
   var target;
-  var evidence = data.confirmed_center_attack_not_just_north_south;
-  if(typeof evidence === 'string' && evidence.length > 0){
+  var alarmFields = [
+    data.jerusalem_attack_warning,
+    data.jerusalem_actual_red_alerts,
+    data.center_dan_or_yehuda_or_jerusalem_danger,
+    data.confirmed_center_attack_not_just_north_south
+  ];
+  var shouldAlarm = alarmFields.some(function(f){ return typeof f === 'string' && f.length > 0; });
+  if(shouldAlarm){
     target = 'alarm';
   }else if(data.any_threat === true){
     target = 'tick';
@@ -588,16 +594,16 @@ function updateIdleTimer(){
 // Four visual groups for the threat panel.
 // {group:...} entries render as subheaders.
 var THREAT_ROWS = [
-  {group:'Israel'},
+  {group:'All of Israel'},
   ['israel_attack_warning','Attack warning'],
   ['israel_actual_red_alerts','Red alerts active'],
   ['attack_involves_missiles_not_just_uavs','Missiles (not just UAVs)'],
   {group:'Jerusalem'},
   ['jerusalem_attack_warning','Attack warning'],
   ['jerusalem_actual_red_alerts','Red alerts active'],
-  {group:'Center / Dan / Yehuda'},
+  {group:'Center / Dan / Yehuda / Jerusalem'},
   ['center_dan_or_yehuda_or_jerusalem_danger','Imminent danger'],
-  ['confirmed_center_attack_not_just_north_south','Confirmed attack (not just N/S)']
+  ['confirmed_center_attack_not_just_north_south','Confirmed center/Jerusalem attack (not just N/S)']
 ];
 
 function esc(s){
