@@ -114,6 +114,40 @@ html,body{height:100%;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Ro
 .ch-count{color:var(--cyan);font-variant-numeric:tabular-nums;text-align:right}
 .ch-time{color:var(--dim);font-variant-numeric:tabular-nums;text-align:right;white-space:nowrap}
 
+/* Debug toasts — numbered, with clear oldest/newest indicators */
+#toast-container{position:fixed;bottom:8px;right:8px;z-index:9998;
+  max-width:min(420px,90vw);display:flex;flex-direction:column-reverse;
+  gap:6px;pointer-events:none;max-height:80vh;overflow-y:auto}
+.toast{padding:8px 10px;border-radius:8px;font-size:.75rem;line-height:1.4;
+  font-family:monospace;word-break:break-word;pointer-events:auto;
+  opacity:0;transform:translateY(10px);animation:toastin .2s forwards;
+  max-height:10rem;overflow-y:auto;border-left:4px solid #555;position:relative}
+.toast.log{background:#0d1a2a;color:#8cf;border-left-color:#2a6aaa}
+.toast.warn{background:#2a1e00;color:#ffc;border-left-color:#aa8800}
+.toast.error{background:#2a0808;color:#fcc;border-left-color:#cc3333}
+/* Newest toast: bright glow + thicker border */
+.toast.newest{border-left-width:6px}
+.toast.newest.log{box-shadow:0 0 12px rgba(88,166,255,0.25);border-left-color:#58a6ff}
+.toast.newest.warn{box-shadow:0 0 12px rgba(210,153,34,0.25);border-left-color:#d29922}
+.toast.newest.error{box-shadow:0 0 12px rgba(248,81,73,0.25);border-left-color:#f85149}
+/* Oldest toast: dimmed */
+.toast.oldest{opacity:.6}
+.toast-seq{display:inline-block;min-width:2.5em;font-weight:900;margin-right:4px;
+  color:#fff;opacity:.5;font-size:.7rem}
+.toast-badge{display:inline-block;font-weight:800;font-size:.6rem;text-transform:uppercase;
+  letter-spacing:.04em;padding:1px 5px;border-radius:3px;margin-right:6px;vertical-align:middle}
+.toast-badge.b-log{background:#1a3a5a;color:#58a6ff}
+.toast-badge.b-warn{background:#4a3500;color:#ffc}
+.toast-badge.b-err{background:#4a0f0f;color:#f85149}
+.toast-tag{display:inline-block;font-weight:800;font-size:.55rem;text-transform:uppercase;
+  letter-spacing:.05em;padding:1px 4px;border-radius:3px;margin-left:6px;vertical-align:middle}
+.toast-tag.t-newest{background:#0f4a2a;color:#3fb950}
+.toast-tag.t-oldest{background:#3a1a00;color:#d29922}
+.toast .toast-countdown{float:right;margin-left:8px;opacity:.5;font-size:.65rem;font-weight:600}
+.toast.fadeout{animation:toastout .3s forwards}
+@keyframes toastin{to{opacity:.92;transform:translateY(0)}}
+@keyframes toastout{to{opacity:0;transform:translateY(10px)}}
+
 /* Loading skeleton */
 #loading{text-align:center;padding:3rem 0;color:var(--dim)}
 #loading .spinner{display:inline-block;width:32px;height:32px;border:3px solid var(--border);
@@ -135,6 +169,9 @@ html,body{height:100%;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Ro
       background:var(--yellow);color:#000;cursor:pointer;font-weight:600">Test Tick</button>
   </div>
 </div>
+
+<!-- Debug toasts (console messages shown on-screen for devices without dev tools) -->
+<div id="toast-container"></div>
 
 <!-- Connection status -->
 <div id="conn-bar" class="ok">Connected</div>
@@ -177,7 +214,11 @@ html,body{height:100%;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Ro
 (function(){
 "use strict";
 
-// Polyfill: String.prototype.padStart (ES2017) — needed for old smart TV browsers.
+// ================================================================
+//  POLYFILLS
+// ================================================================
+
+// String.prototype.padStart (ES2017) — needed for old smart TV browsers.
 if(!String.prototype.padStart){
   String.prototype.padStart = function(len, fill){
     var s = String(this); fill = fill || ' ';
@@ -185,6 +226,170 @@ if(!String.prototype.padStart){
     return s;
   };
 }
+
+// Array.prototype.some — should exist everywhere, but belt-and-suspenders.
+if(!Array.prototype.some){
+  Array.prototype.some = function(fn){
+    for(var i = 0; i < this.length; i++){
+      if(fn(this[i], i, this)) return true;
+    }
+    return false;
+  };
+}
+
+// ================================================================
+//  DEBUG TOASTS
+//
+//  Intercepts console.log/warn/error to show messages on-screen.
+//  Each toast is sequentially numbered (#1, #2, ...) so order is
+//  unambiguous. The NEWEST toast gets a bright glow + "NEWEST" tag.
+//  The OLDEST visible toast gets an "OLDEST" tag + dimmed opacity.
+//  Toasts auto-dismiss after 30s with a visible countdown.
+//  Hovering any toast pauses ALL countdowns.
+// ================================================================
+
+var TOASTS_ENABLED = false; // set to true to show debug toasts on-screen
+var _toastContainer = document.getElementById('toast-container');
+var _maxToasts = 20;
+var _toastSeq = 0;
+var _newestToastEl = null;
+var _hoverCount = 0; // number of toasts being hovered (pauses all timers)
+
+function _formatArg(a){
+  if(a === null) return 'null';
+  if(a === undefined) return 'undefined';
+  if(a instanceof Error) return (a.name || 'Error') + ': ' + (a.message || '(no message)');
+  if(typeof a === 'string') return a;
+  if(typeof a === 'number' || typeof a === 'boolean') return String(a);
+  try{
+    var j = JSON.stringify(a);
+    if(j === '{}' || j === '[]') return String(a) !== '[object Object]' ? String(a) : j;
+    return j;
+  }catch(e){
+    return String(a);
+  }
+}
+
+function _updateOldestNewest(){
+  if(!_toastContainer) return;
+  var children = _toastContainer.children;
+  for(var i = 0; i < children.length; i++){
+    var c = children[i];
+    // Remove old tags
+    c.className = c.className.replace(/\s*(newest|oldest)/g, '');
+    var oldTags = c.querySelectorAll('.toast-tag');
+    for(var j = 0; j < oldTags.length; j++){
+      if(oldTags[j].parentNode) oldTags[j].parentNode.removeChild(oldTags[j]);
+    }
+  }
+  if(children.length === 0) return;
+  // First DOM child = oldest visible (appears at bottom due to column-reverse)
+  var oldest = children[0];
+  // Last DOM child = newest (appears at top due to column-reverse)
+  var newest = children[children.length - 1];
+  newest.className += ' newest';
+  _newestToastEl = newest;
+
+  // Add tag badges (only if more than 1 toast)
+  if(children.length > 1){
+    oldest.className += ' oldest';
+    var oTag = document.createElement('span');
+    oTag.className = 'toast-tag t-oldest';
+    oTag.textContent = 'OLDEST';
+    // Insert after the countdown span (last child)
+    var oFirstLine = oldest.querySelector('.toast-seq');
+    if(oFirstLine && oFirstLine.parentNode){
+      oFirstLine.parentNode.insertBefore(oTag, oFirstLine.nextSibling);
+    }
+
+    var nTag = document.createElement('span');
+    nTag.className = 'toast-tag t-newest';
+    nTag.textContent = 'NEWEST';
+    var nFirstLine = newest.querySelector('.toast-seq');
+    if(nFirstLine && nFirstLine.parentNode){
+      nFirstLine.parentNode.insertBefore(nTag, nFirstLine.nextSibling);
+    }
+  }
+}
+
+function _showToast(level, args){
+  if(!TOASTS_ENABLED || !_toastContainer) return;
+
+  // Build message from arguments
+  var parts = [];
+  for(var i = 0; i < args.length; i++){
+    var formatted = _formatArg(args[i]);
+    if(formatted) parts.push(formatted);
+  }
+  var msg = parts.join(' ');
+  if(!msg || !msg.replace(/\s/g,'')) return; // skip blank toasts
+
+  _toastSeq++;
+  var seq = _toastSeq;
+  var badgeClass = level === 'error' ? 'b-err' : level === 'warn' ? 'b-warn' : 'b-log';
+  var levelLabel = level === 'error' ? 'ERR' : level === 'warn' ? 'WRN' : 'LOG';
+
+  var el = document.createElement('div');
+  el.className = 'toast ' + level;
+
+  // Build inner HTML:  #N [LEVEL] message text                    30s
+  var seqSpan = document.createElement('span');
+  seqSpan.className = 'toast-seq';
+  seqSpan.textContent = '#' + seq;
+
+  var badge = document.createElement('span');
+  badge.className = 'toast-badge ' + badgeClass;
+  badge.textContent = levelLabel;
+
+  var textSpan = document.createElement('span');
+  textSpan.textContent = msg;
+
+  var countSpan = document.createElement('span');
+  countSpan.className = 'toast-countdown';
+
+  el.appendChild(seqSpan);
+  el.appendChild(badge);
+  el.appendChild(textSpan);
+  el.appendChild(countSpan);
+
+  _toastContainer.appendChild(el);
+
+  // Cap total toasts — remove oldest
+  while(_toastContainer.children.length > _maxToasts){
+    _toastContainer.removeChild(_toastContainer.children[0]);
+  }
+
+  // Update oldest/newest classes and tags
+  _updateOldestNewest();
+
+  // 30s countdown, pauses on hover of ANY toast
+  var remaining = 30;
+  countSpan.textContent = remaining + 's';
+
+  var tick = setInterval(function(){
+    if(_hoverCount > 0) return; // any toast hovered → freeze all
+    remaining--;
+    countSpan.textContent = remaining + 's';
+    if(remaining <= 0){
+      clearInterval(tick);
+      el.className = 'toast ' + level + ' fadeout';
+      setTimeout(function(){
+        if(el.parentNode) el.parentNode.removeChild(el);
+        _updateOldestNewest();
+      }, 300);
+    }
+  }, 1000);
+
+  el.addEventListener('mouseenter', function(){ _hoverCount++; });
+  el.addEventListener('mouseleave', function(){ _hoverCount = Math.max(0, _hoverCount - 1); });
+}
+
+var _origLog = console.log;
+var _origWarn = console.warn;
+var _origError = console.error;
+console.log = function(){ _origLog.apply(console, arguments); try{ _showToast('log', arguments); }catch(e){} };
+console.warn = function(){ _origWarn.apply(console, arguments); try{ _showToast('warn', arguments); }catch(e){} };
+console.error = function(){ _origError.apply(console, arguments); try{ _showToast('error', arguments); }catch(e){} };
 
 // ================================================================
 //  CONFIGURATION
@@ -196,202 +401,220 @@ var FETCH_TIMEOUT = 8000;
 // ================================================================
 //  STATE
 // ================================================================
-var audioCtx       = null;
-var audioUnlocked  = false;
-var lastVersion    = -1;
-var lastTimestamp   = null;
-var lastIdleSince  = '';
-var lastData       = null;
+var audioUnlocked   = false;
+var lastVersion     = -1;
+var lastTimestamp    = null;
+var lastIdleSince   = '';
+var lastData        = null;
 var consecutiveFails = 0;
-var pollTimer      = null;
-var pollInFlight   = false;
-var timerHandle    = null;
-var everHadData    = false;
+var pollTimer       = null;
+var pollInFlight    = false;
+var timerHandle     = null;
+var everHadData     = false;
 
 // ================================================================
 //  AUDIO ENGINE
 //
-//  Three mutually-exclusive sound states, driven by booleans:
+//  Three mutually-exclusive sound states:
 //
 //    'alarm'  — ANY of the four Jerusalem/center fields is
-//               non-empty. alarm.wav loops at max volume until
-//               all four go empty. This is the wake-up sound.
+//               non-empty. Loops alarm.wav (via Web Audio
+//               AudioBufferSourceNode) at max volume. If
+//               decoding failed, falls back to generated siren.
 //
-//    'tick'   — any OTHER threat boolean is TRUE (but not the
-//               evidence one). A soft periodic tick every 1s.
-//               "Something is happening, stay aware."
+//    'tick'   — any OTHER threat boolean is TRUE. Soft periodic
+//               click every 1s. "Something is happening."
 //
-//    'silent' — all booleans FALSE. No sound at all.
+//    'silent' — all booleans FALSE. No sound.
 //
-//  updateSoundState(data) is called on EVERY successful poll.
-//  It is fully idempotent: if the target state matches the
-//  current state, it does nothing. Transitions are instant.
+//  CRITICAL DESIGN: alarm.wav is downloaded as an ArrayBuffer and
+//  decoded via audioCtx.decodeAudioData() into an AudioBuffer.
+//  It is then played via AudioBufferSourceNode with loop=true.
+//  This uses PURE Web Audio API — no <audio> elements, no blob
+//  URLs, no media element autoplay quirks. This is the same API
+//  path as the tick sound, which is proven to work on smart TVs.
 //
-//  On connection loss, sound continues based on last known state.
-//  This is intentional: if we lose WiFi during an attack, the
-//  alarm must NOT stop.
+//  On connection loss, sound continues. If we lose WiFi during
+//  an attack, the alarm must NOT stop.
 // ================================================================
 
-var soundState     = 'silent';  // current: 'silent' | 'tick' | 'alarm'
-var alarmEl        = null;      // <audio> element for alarm.wav
-var alarmReady     = false;     // true once alarm.wav is loadable
-var tickTimer      = null;      // setInterval handle for tick
-var tickBuffer     = null;      // pre-decoded AudioBuffer for tick click
+var soundState      = 'silent';  // 'silent' | 'tick' | 'alarm'
 
-// ── Alarm: <audio> element with loop, max volume ──
+// ================================================================
+//  AUDIO ENGINE — <audio> ELEMENTS ONLY
+//
+//  Uses native <audio> elements exclusively. No Web Audio API.
+//  Web Audio (AudioContext, oscillators, AudioBufferSourceNode)
+//  produces zero audible output on Hisense smart TVs despite
+//  reporting state=running. <audio> elements are the only reliable
+//  cross-device path (phones, desktops, and smart TVs).
+//
+//  Audio files:
+//
+//  alarm.mp3 — Generated from alarm.wav:
+//    ffmpeg -i alarm.wav -codec:a libmp3lame -b:a 128k alarm.mp3
+//
+//  tick.mp3 — Generated programmatically:
+//    ffmpeg -f lavfi -i "aevalsrc='sin(800*2*PI*t)*exp(-200*t)*0.15':s=44100:d=0.15" \
+//      -codec:a libmp3lame -b:a 128k tick.mp3
+//    (150ms, 800Hz sine with exponential decay, ~3KB)
+//
+//  Both files are pre-loaded at page load so they're cached and
+//  available instantly, even in a bomb shelter with no internet.
+// ================================================================
 
-// Eagerly fetch alarm.wav into memory at page load so it's available
-// even in a bomb shelter with very slow or no internet later.
-var alarmBlobUrl = null;
+// Alarm state
+var alarmEl         = null;      // <audio> element (alarm.mp3, loop=true)
+var alarmReady      = false;     // true once canplaythrough fires
+var alarmRetryTimer = null;      // retry interval when play() is rejected
 
-function initAlarmElement(){
-  // Create once. Re-use forever.
-  if(alarmEl) return;
+// Tick state
+var tickTimer       = null;      // setInterval handle for 1s tick
 
-  function createFromUrl(url){
-    alarmEl = new Audio(url);
+// MediaError code names (for logging)
+var MEDIA_ERR_NAMES = {1:'ABORTED', 2:'NETWORK', 3:'DECODE', 4:'SRC_NOT_SUPPORTED'};
+
+// ================================================================
+//  PRE-LOAD AUDIO AT PAGE LOAD
+// ================================================================
+
+function preloadAudio(){
+  // ── Alarm ──
+  console.log('[ALARM:LOAD] Pre-loading alarm.mp3');
+  try{
+    alarmEl = new Audio('/alarm.mp3');
     alarmEl.loop = true;
     alarmEl.volume = 1.0;
     alarmEl.preload = 'auto';
     alarmEl.addEventListener('canplaythrough', function(){
-      alarmReady = true;
+      if(!alarmReady){
+        alarmReady = true;
+        console.log('[ALARM:LOAD] alarm.mp3 ready');
+      }
     });
     alarmEl.addEventListener('error', function(){
-      console.warn('alarm.wav failed to load — will use generated fallback');
-      alarmReady = false;
+      var code = alarmEl.error ? alarmEl.error.code : '?';
+      var name = MEDIA_ERR_NAMES[code] || 'UNKNOWN';
+      console.error('[ALARM:LOAD] alarm.mp3 FAILED: MediaError ' + code + ' (' + name + ')');
     });
+  }catch(e){
+    console.error('[ALARM:LOAD] Failed to create alarm Audio element:', e);
   }
 
-  if(alarmBlobUrl){
-    // Already fetched into memory — use the blob URL (works offline)
-    createFromUrl(alarmBlobUrl);
-  }else{
-    // Fallback: use network URL directly (preload=auto is a hint, not guaranteed)
-    createFromUrl('/alarm.wav');
+  // ── Tick ──
+  // Pre-load so the first play() doesn't have network latency.
+  // Each tick creates a fresh Audio('/tick.mp3') because reusing
+  // one element with currentTime=0 is unreliable on smart TVs.
+  // The browser cache ensures this is instant after the first load.
+  console.log('[TICK:LOAD] Pre-loading tick.mp3');
+  try{
+    var tickPreload = new Audio('/tick.mp3');
+    tickPreload.preload = 'auto';
+    tickPreload.volume = 0;
+    tickPreload.addEventListener('canplaythrough', function(){
+      console.log('[TICK:LOAD] tick.mp3 cached and ready');
+    });
+    tickPreload.addEventListener('error', function(){
+      var code = tickPreload.error ? tickPreload.error.code : '?';
+      var name = MEDIA_ERR_NAMES[code] || 'UNKNOWN';
+      console.error('[TICK:LOAD] tick.mp3 FAILED: MediaError ' + code + ' (' + name + ')');
+    });
+  }catch(e){
+    console.error('[TICK:LOAD] Failed to pre-load tick:', e);
   }
 }
 
-// Eagerly download the entire alarm.wav into a blob at page load.
-// This ensures the file is fully in memory before an emergency.
-// Uses XHR (not fetch) for smart TV browser compatibility.
-try{
-  var _alarmXhr = new XMLHttpRequest();
-  _alarmXhr.open('GET', '/alarm.wav', true);
-  _alarmXhr.responseType = 'blob';
-  _alarmXhr.onload = function(){
-    if(_alarmXhr.status >= 200 && _alarmXhr.status < 300 && _alarmXhr.response){
-      try{
-        alarmBlobUrl = URL.createObjectURL(_alarmXhr.response);
-        console.log('alarm.wav pre-cached into memory (' + _alarmXhr.response.size + ' bytes)');
-        // If the Audio element was already created from the network URL,
-        // replace it with the blob version so it works offline.
-        if(alarmEl){
-          var wasReady = alarmReady;
-          alarmEl = null;
-          alarmReady = false;
-          initAlarmElement();
-          if(wasReady) alarmReady = true;
-        }
-      }catch(e){
-        console.warn('alarm.wav blob URL creation failed (old browser?) — will use direct URL:', e);
-      }
-    }
-  };
-  _alarmXhr.onerror = function(){
-    console.warn('alarm.wav pre-cache failed — will load on demand or use fallback');
-  };
-  _alarmXhr.send();
-}catch(e){
-  console.warn('alarm.wav XHR pre-cache not supported — will load on demand or use fallback');
-}
+// ================================================================
+//  ALARM — start / stop
+//
+//  If play() is rejected (e.g. page loaded during an active alarm
+//  before the user has interacted — Android autoplay policy), we
+//  retry every 500ms until it succeeds or the alarm is stopped.
+//  This handles the "open page during alarm" scenario without any
+//  generated-audio fallback.
+// ================================================================
 
 function startAlarm(){
-  if(alarmReady && alarmEl){
-    alarmEl.volume = 1.0;
-    alarmEl.currentTime = 0;
-    var p = alarmEl.play();
-    if(p && typeof p.catch === 'function'){
-      p.catch(function(e){
-        console.warn('alarm.wav play failed, using fallback:', e);
-        startAlarmFallback();
-      });
-    }
-  }else{
-    startAlarmFallback();
+  console.log('[ALARM] startAlarm: ready=' + alarmReady);
+  clearAlarmRetry();
+  attemptAlarmPlay();
+}
+
+function attemptAlarmPlay(){
+  if(soundState !== 'alarm') return; // stopped while we were waiting
+  if(!alarmReady || !alarmEl){
+    // Element not loaded yet — keep retrying
+    console.log('[ALARM] Not ready yet, will retry in 500ms');
+    scheduleAlarmRetry();
+    return;
   }
+
+  try{
+    alarmEl.currentTime = 0;
+    alarmEl.volume = 1.0;
+    var p = alarmEl.play();
+    if(p && typeof p.then === 'function'){
+      p.then(function(){
+        console.log('[ALARM] Playing');
+        clearAlarmRetry();
+      }).catch(function(e){
+        console.warn('[ALARM] play() rejected (autoplay policy?), retrying in 500ms:', e);
+        scheduleAlarmRetry();
+      });
+    }else{
+      // Old browser: synchronous play(), assume success
+      console.log('[ALARM] play() called (sync, old browser)');
+      clearAlarmRetry();
+    }
+  }catch(e){
+    console.error('[ALARM] play() threw, retrying in 500ms:', e);
+    scheduleAlarmRetry();
+  }
+}
+
+function scheduleAlarmRetry(){
+  if(alarmRetryTimer) return; // already scheduled
+  alarmRetryTimer = setInterval(function(){
+    if(soundState !== 'alarm'){
+      clearAlarmRetry();
+      return;
+    }
+    attemptAlarmPlay();
+  }, 500);
+}
+
+function clearAlarmRetry(){
+  if(alarmRetryTimer){ clearInterval(alarmRetryTimer); alarmRetryTimer = null; }
 }
 
 function stopAlarm(){
+  clearAlarmRetry();
   if(alarmEl){
-    alarmEl.pause();
-    alarmEl.currentTime = 0;
-  }
-  stopAlarmFallback();
-}
-
-// Fallback: Web Audio generated siren that loops via a recurring timer
-var fallbackTimer = null;
-
-function playFallbackBurst(){
-  ensureAudioCtx();
-  if(!audioCtx) return;
-  var now = audioCtx.currentTime;
-  for(var i=0; i<3; i++){
-    var osc = audioCtx.createOscillator();
-    var g = audioCtx.createGain();
-    osc.connect(g); g.connect(audioCtx.destination);
-    osc.type = 'square';
-    osc.frequency.setValueAtTime(800,  now+i*0.6);
-    osc.frequency.setValueAtTime(1200, now+i*0.6+0.3);
-    g.gain.setValueAtTime(0.3, now+i*0.6);
-    g.gain.setValueAtTime(0,   now+i*0.6+0.58);
-    osc.start(now+i*0.6); osc.stop(now+i*0.6+0.6);
+    try{ alarmEl.pause(); alarmEl.currentTime = 0; }catch(e){}
   }
 }
 
-function startAlarmFallback(){
-  if(fallbackTimer) return; // already running
-  playFallbackBurst();
-  fallbackTimer = setInterval(playFallbackBurst, 2000);
-}
-
-function stopAlarmFallback(){
-  if(fallbackTimer){ clearInterval(fallbackTimer); fallbackTimer = null; }
-}
-
-// ── Tick: soft click every 1s via Web Audio ──
-
-function buildTickBuffer(){
-  ensureAudioCtx();
-  if(!audioCtx || tickBuffer) return;
-  // Short 20ms click: a damped sine at 800Hz
-  var sr = audioCtx.sampleRate;
-  var len = Math.floor(sr * 0.02); // 20ms
-  var buf = audioCtx.createBuffer(1, len, sr);
-  var data = buf.getChannelData(0);
-  for(var i=0; i<len; i++){
-    var t = i/sr;
-    // Sine burst with exponential decay
-    data[i] = Math.sin(2 * Math.PI * 800 * t) * Math.exp(-t * 200) * 0.12;
-  }
-  tickBuffer = buf;
-}
+// ================================================================
+//  TICK — start / stop
+//
+//  Each tick creates a fresh Audio('/tick.mp3') element. This is
+//  the only approach that works reliably on smart TVs (reusing one
+//  element with currentTime=0 fails on short clips). The file is
+//  3KB and served from browser cache after the initial preload.
+// ================================================================
 
 function playOneTick(){
-  ensureAudioCtx();
-  if(!audioCtx) return;
-  if(!tickBuffer) buildTickBuffer();
-  if(!tickBuffer) return;
-  var src = audioCtx.createBufferSource();
-  src.buffer = tickBuffer;
-  src.connect(audioCtx.destination);
-  src.start(0);
+  try{
+    var t = new Audio('/tick.mp3');
+    t.volume = 0.3;
+    var p = t.play();
+    if(p && typeof p.catch === 'function') p.catch(function(){});
+  }catch(e){}
 }
 
 function startTick(){
-  if(tickTimer) return; // already ticking
-  buildTickBuffer();
-  playOneTick(); // immediate first tick
+  if(tickTimer) return;
+  playOneTick();
   tickTimer = setInterval(playOneTick, 1000);
 }
 
@@ -399,146 +622,163 @@ function stopTick(){
   if(tickTimer){ clearInterval(tickTimer); tickTimer = null; }
 }
 
-// ── AudioContext management ──
-
-function ensureAudioCtx(){
-  if(!audioCtx || audioCtx.state === 'closed'){
-    try{ audioCtx = new(window.AudioContext||window.webkitAudioContext)(); }
-    catch(e){ return; }
-  }
-  if(audioCtx.state === 'suspended'){
-    var p = audioCtx.resume();
-    if(p && typeof p.catch === 'function') p.catch(function(){});
-  }
-}
-
-// ── The core state machine: called on every poll ──
+// ================================================================
+//  SOUND STATE MACHINE (called on every poll)
+// ================================================================
 
 function updateSoundState(data){
   if(!audioUnlocked) return;
+  if(testMode) return; // don't clobber test playback; will re-evaluate when test ends
 
-  // Determine target state from threat fields.
-  // evidence_for_... is now a string — non-empty triggers alarm.
-  // any_threat is still a boolean.
   var target;
-  var alarmFields = [
-    data.jerusalem_attack_warning,
-    data.jerusalem_actual_red_alerts,
-    data.center_dan_or_yehuda_or_jerusalem_danger,
-    data.confirmed_center_attack_not_just_north_south
-  ];
-  var shouldAlarm = alarmFields.some(function(f){ return typeof f === 'string' && f.length > 0; });
-  if(shouldAlarm){
-    target = 'alarm';
-  }else if(data.any_threat === true){
-    target = 'tick';
-  }else{
-    target = 'silent';
+  try{
+    var alarmFields = [
+      data.jerusalem_attack_warning,
+      data.jerusalem_actual_red_alerts,
+      data.center_dan_or_yehuda_or_jerusalem_danger,
+      data.confirmed_center_attack_not_just_north_south
+    ];
+    var shouldAlarm = alarmFields.some(function(f){
+      return typeof f === 'string' && f.length > 0;
+    });
+    if(shouldAlarm){
+      target = 'alarm';
+    }else if(data.any_threat === true){
+      target = 'tick';
+    }else{
+      target = 'silent';
+    }
+  }catch(e){
+    console.error('[SOUND] Error computing target state:', e);
+    return;
   }
 
-  // Idempotent: no-op if already in the right state.
   if(target === soundState) return;
 
-  // Transition: stop old, start new.
-  if(soundState === 'alarm'){ stopAlarm(); }
-  if(soundState === 'tick') { stopTick(); }
+  console.log('[SOUND] Transitioning: ' + soundState + ' -> ' + target);
 
-  if(target === 'alarm'){ startAlarm(); }
-  if(target === 'tick') { startTick(); }
+  try{
+    if(soundState === 'alarm') stopAlarm();
+    if(soundState === 'tick')  stopTick();
+  }catch(e){
+    console.error('[SOUND] Error stopping ' + soundState + ':', e);
+  }
+
+  try{
+    if(target === 'alarm') startAlarm();
+    if(target === 'tick')  startTick();
+  }catch(e){
+    console.error('[SOUND] Error starting ' + target + ':', e);
+  }
 
   soundState = target;
 }
 
-// ── Unlock (Chrome/Safari autoplay policy) ──
+// ================================================================
+//  UNLOCK (Chrome/Safari autoplay policy)
+// ================================================================
 
 window.unlock = function(){
-  // Create and unlock AudioContext
-  try{
-    audioCtx = new(window.AudioContext||window.webkitAudioContext)();
-    var buf = audioCtx.createBuffer(1, 1, 22050);
-    var src = audioCtx.createBufferSource();
-    src.buffer = buf; src.connect(audioCtx.destination); src.start(0);
-  }catch(e){ console.warn('AudioContext init failed', e); }
+  console.log('[UNLOCK] User tapped Enable Alerts');
 
-  // Pre-interact with alarm.wav so the browser allows future playback
-  initAlarmElement();
+  // Pre-interact with alarm <audio> to satisfy autoplay policy.
+  // Play silently then immediately pause — this "unlocks" the
+  // element for future programmatic play() calls.
   if(alarmEl){
-    alarmEl.volume = 0;
-    var p = alarmEl.play();
-    if(p && typeof p.then === 'function'){
-      p.then(function(){
-        alarmEl.pause();
-        alarmEl.currentTime = 0;
-        alarmEl.volume = 1.0;
-      }).catch(function(){});
-    }else{
-      // Old browser: play() is synchronous, no promise returned
-      try{ alarmEl.pause(); alarmEl.currentTime = 0; alarmEl.volume = 1.0; }catch(e){}
+    try{
+      alarmEl.volume = 0;
+      var p = alarmEl.play();
+      if(p && typeof p.then === 'function'){
+        p.then(function(){
+          alarmEl.pause();
+          alarmEl.currentTime = 0;
+          alarmEl.volume = 1.0;
+          console.log('[UNLOCK] Alarm <audio> unlocked');
+        }).catch(function(e){
+          console.warn('[UNLOCK] Alarm pre-interact rejected:', e);
+          // Will retry when startAlarm is called
+        });
+      }else{
+        try{ alarmEl.pause(); alarmEl.currentTime = 0; alarmEl.volume = 1.0; }catch(e){}
+      }
+    }catch(e){
+      console.warn('[UNLOCK] Alarm pre-interact error:', e);
     }
+  }else{
+    console.warn('[UNLOCK] No alarm element yet (still loading?)');
   }
 
-  // Pre-build tick buffer
-  buildTickBuffer();
+  // Pre-interact with tick by playing one silently
+  try{
+    var t = new Audio('/tick.mp3');
+    t.volume = 0;
+    var pt = t.play();
+    if(pt && typeof pt.then === 'function'){
+      pt.then(function(){ t.pause(); console.log('[UNLOCK] Tick unlocked'); })
+        .catch(function(){});
+    }
+  }catch(e){}
 
   audioUnlocked = true;
-  document.getElementById('welcome').classList.add('hidden');
 
-  // Polling is already running (started on page load). Apply sound to current data.
+  try{
+    document.getElementById('welcome').classList.add('hidden');
+  }catch(e){}
+
+  console.log('[UNLOCK] Audio unlocked, alarmReady=' + alarmReady);
+
   if(lastData) updateSoundState(lastData);
 };
 
-// ── Test sound from the welcome screen ──
-// Plays the chosen sound for 3 seconds, then stops and cleans up.
-// Does NOT set audioUnlocked or dismiss the overlay — unlock() still
-// runs normally afterward. Safe to call multiple times.
+// ================================================================
+//  TEST SOUND (from welcome screen)
+// ================================================================
+
 var testSoundTimer = null;
+var testMode = false;
 
 window.testSound = function(which){
-  // Stop any previous test in progress
-  if(testSoundTimer){ clearTimeout(testSoundTimer); testSoundTimer = null; }
-  stopAlarm();
-  stopTick();
+  console.log('[TEST] Testing: ' + which);
 
-  // Initialize audio (same as unlock, but without setting audioUnlocked)
-  try{
-    if(!audioCtx || audioCtx.state === 'closed'){
-      audioCtx = new(window.AudioContext||window.webkitAudioContext)();
-    }
-    var buf = audioCtx.createBuffer(1, 1, 22050);
-    var src = audioCtx.createBufferSource();
-    src.buffer = buf; src.connect(audioCtx.destination); src.start(0);
-  }catch(e){}
-  if(audioCtx && audioCtx.state === 'suspended'){
-    var p = audioCtx.resume();
-    if(p && typeof p.catch === 'function') p.catch(function(){});
-  }
+  // If already testing, clean up the previous test first
+  if(testSoundTimer){ clearTimeout(testSoundTimer); testSoundTimer = null; }
+  try{ stopAlarm(); }catch(e){}
+  try{ stopTick(); }catch(e){}
+
+  // Enter test mode: blocks updateSoundState from interfering
+  testMode = true;
+  var wasUnlocked = audioUnlocked;
+  audioUnlocked = true;
+  soundState = 'silent'; // clean baseline so startAlarm/startTick transition properly
 
   if(which === 'alarm'){
-    initAlarmElement();
+    soundState = 'alarm';
     startAlarm();
   }else{
-    buildTickBuffer();
+    soundState = 'tick';
     startTick();
   }
 
-  // Auto-stop after 3 seconds
   testSoundTimer = setTimeout(function(){
-    stopAlarm();
-    stopTick();
+    console.log('[TEST] Auto-stop after 3s');
+    try{ stopAlarm(); }catch(e){}
+    try{ stopTick(); }catch(e){}
     soundState = 'silent';
+    testMode = false;
+    audioUnlocked = wasUnlocked;
     testSoundTimer = null;
+
+    // Re-evaluate real data so a real alarm isn't silenced by the test ending
+    if(audioUnlocked && lastData){
+      updateSoundState(lastData);
+    }
   }, 3000);
 };
 
 // ================================================================
 //  DATA VALIDATION
-//
-//  Every poll response is strictly validated before rendering.
-//  Mismatches are logged loudly to the console AND shown in a
-//  persistent bar at the bottom of the screen. Nothing slides.
 // ================================================================
 
-// Threat fields are now strings (non-empty = active reason, "" = inactive).
 var EXPECTED_THREAT_STRING_KEYS = [
   'israel_attack_warning',
   'israel_actual_red_alerts',
@@ -548,182 +788,175 @@ var EXPECTED_THREAT_STRING_KEYS = [
   'center_dan_or_yehuda_or_jerusalem_danger',
   'confirmed_center_attack_not_just_north_south'
 ];
-// any_threat remains a boolean (computed server-side).
 var EXPECTED_BOOL_KEYS = ['any_threat'];
-
 var EXPECTED_NEWS_STRING_KEYS = [
   'channel', 'headline', 'importance', 'summary',
   'time_of_report', 'time_of_event'
 ];
 
-var validationErrors = [];
-
 function showValidationErrors(errors){
-  var bar = document.getElementById('validation-bar');
-  if(!errors.length){
-    bar.className = '';
-    bar.style.display = 'none';
-    return;
+  try{
+    var bar = document.getElementById('validation-bar');
+    if(!errors.length){
+      bar.className = '';
+      bar.style.display = 'none';
+      return;
+    }
+    bar.className = 'visible';
+    bar.style.display = 'block';
+    bar.innerHTML = '<strong>VALIDATION (' + errors.length + ' issue'
+      + (errors.length > 1 ? 's' : '') + '):</strong><br>'
+      + errors.map(function(e){ return esc(e); }).join('<br>');
+  }catch(e){
+    console.error('[VALID] showValidationErrors error:', e);
   }
-  bar.className = 'visible';
-  bar.style.display = 'block';
-  bar.innerHTML = '<strong>VALIDATION (' + errors.length + ' issue'
-    + (errors.length>1?'s':'') + '):</strong><br>'
-    + errors.map(function(e){ return esc(e); }).join('<br>');
 }
 
-/** Validate the full /api/status payload. Returns the list of errors (empty = OK). */
 function validatePayload(d){
   var errs = [];
-
-  // Must be a non-null object
-  if(d === null || typeof d !== 'object' || Array.isArray(d)){
-    errs.push('payload is not a JSON object (got ' + typeof d + ')');
-    return errs; // nothing else to check
-  }
-
-  // version: must be a finite number
-  if(typeof d.version !== 'number' || !isFinite(d.version)){
-    errs.push('version: expected number, got ' + typeof d.version + ' (' + String(d.version) + ')');
-  }else if(d.version < 0){
-    errs.push('version: expected non-negative, got ' + d.version);
-  }
-
-  // timestamp: must be a string
-  if(typeof d.timestamp !== 'string'){
-    errs.push('timestamp: expected string, got ' + typeof d.timestamp);
-  }else if(d.version > 0 && d.timestamp.length === 0){
-    errs.push('timestamp: empty string on a non-zero version (' + d.version + ')');
-  }
-
-  // idle_since: must be a string (empty = active, ISO-8601 = idle start)
-  if(typeof d.idle_since !== 'string'){
-    errs.push('idle_since: expected string, got ' + typeof d.idle_since);
-  }
-
-  // Threat string fields: every one must be present and a string
-  for(var i=0; i<EXPECTED_THREAT_STRING_KEYS.length; i++){
-    var tkey = EXPECTED_THREAT_STRING_KEYS[i];
-    if(!(tkey in d)){
-      errs.push(tkey + ': MISSING from payload');
-    }else if(typeof d[tkey] !== 'string'){
-      errs.push(tkey + ': expected string, got ' + typeof d[tkey] + ' (' + JSON.stringify(d[tkey]) + ')');
+  try{
+    if(d === null || typeof d !== 'object' || Array.isArray(d)){
+      errs.push('payload is not a JSON object (got ' + typeof d + ')');
+      return errs;
     }
-  }
 
-  // Boolean fields (any_threat): must be present and actually boolean
-  for(var i=0; i<EXPECTED_BOOL_KEYS.length; i++){
-    var key = EXPECTED_BOOL_KEYS[i];
-    if(!(key in d)){
-      errs.push(key + ': MISSING from payload');
-    }else if(typeof d[key] !== 'boolean'){
-      errs.push(key + ': expected boolean, got ' + typeof d[key] + ' (' + JSON.stringify(d[key]) + ')');
+    if(typeof d.version !== 'number' || !isFinite(d.version)){
+      errs.push('version: expected number, got ' + typeof d.version + ' (' + String(d.version) + ')');
+    }else if(d.version < 0){
+      errs.push('version: expected non-negative, got ' + d.version);
     }
-  }
 
-  // news: must be an array
-  if(!('news' in d)){
-    errs.push('news: MISSING from payload');
-  }else if(!Array.isArray(d.news)){
-    errs.push('news: expected array, got ' + typeof d.news);
-  }else{
-    // Validate each news item
-    for(var j=0; j<d.news.length; j++){
-      var item = d.news[j];
-      var prefix = 'news[' + j + ']';
-      if(item === null || typeof item !== 'object' || Array.isArray(item)){
-        errs.push(prefix + ': expected object, got ' + typeof item);
-        continue;
+    if(typeof d.timestamp !== 'string'){
+      errs.push('timestamp: expected string, got ' + typeof d.timestamp);
+    }else if(d.version > 0 && d.timestamp.length === 0){
+      errs.push('timestamp: empty string on a non-zero version (' + d.version + ')');
+    }
+
+    if(typeof d.idle_since !== 'string'){
+      errs.push('idle_since: expected string, got ' + typeof d.idle_since);
+    }
+
+    for(var i = 0; i < EXPECTED_THREAT_STRING_KEYS.length; i++){
+      var tkey = EXPECTED_THREAT_STRING_KEYS[i];
+      if(!(tkey in d)){
+        errs.push(tkey + ': MISSING from payload');
+      }else if(typeof d[tkey] !== 'string'){
+        errs.push(tkey + ': expected string, got ' + typeof d[tkey] + ' (' + JSON.stringify(d[tkey]) + ')');
       }
-      for(var k=0; k<EXPECTED_NEWS_STRING_KEYS.length; k++){
-        var skey = EXPECTED_NEWS_STRING_KEYS[k];
-        if(!(skey in item)){
-          errs.push(prefix + '.' + skey + ': MISSING');
-        }else if(typeof item[skey] !== 'string'){
-          errs.push(prefix + '.' + skey + ': expected string, got '
-            + typeof item[skey] + ' (' + JSON.stringify(item[skey]) + ')');
+    }
+
+    for(var i = 0; i < EXPECTED_BOOL_KEYS.length; i++){
+      var key = EXPECTED_BOOL_KEYS[i];
+      if(!(key in d)){
+        errs.push(key + ': MISSING from payload');
+      }else if(typeof d[key] !== 'boolean'){
+        errs.push(key + ': expected boolean, got ' + typeof d[key] + ' (' + JSON.stringify(d[key]) + ')');
+      }
+    }
+
+    if(!('news' in d)){
+      errs.push('news: MISSING from payload');
+    }else if(!Array.isArray(d.news)){
+      errs.push('news: expected array, got ' + typeof d.news);
+    }else{
+      for(var j = 0; j < d.news.length; j++){
+        var item = d.news[j];
+        var prefix = 'news[' + j + ']';
+        if(item === null || typeof item !== 'object' || Array.isArray(item)){
+          errs.push(prefix + ': expected object, got ' + typeof item);
+          continue;
+        }
+        for(var k = 0; k < EXPECTED_NEWS_STRING_KEYS.length; k++){
+          var skey = EXPECTED_NEWS_STRING_KEYS[k];
+          if(!(skey in item)){
+            errs.push(prefix + '.' + skey + ': MISSING');
+          }else if(typeof item[skey] !== 'string'){
+            errs.push(prefix + '.' + skey + ': expected string, got '
+              + typeof item[skey] + ' (' + JSON.stringify(item[skey]) + ')');
+          }
         }
       }
     }
-  }
 
-  // Warn about unexpected top-level keys (may indicate schema drift)
-  var KNOWN_KEYS = {
-    version:1, timestamp:1, idle_since:1, news:1,
-    israel_attack_warning:1, israel_actual_red_alerts:1,
-    attack_involves_missiles_not_just_uavs:1,
-    jerusalem_attack_warning:1, jerusalem_actual_red_alerts:1,
-    center_dan_or_yehuda_or_jerusalem_danger:1,
-    confirmed_center_attack_not_just_north_south:1,
-    any_threat:1, channels:1
-  };
-  var dKeys = Object.keys(d);
-  for(var m=0; m<dKeys.length; m++){
-    if(!KNOWN_KEYS[dKeys[m]]){
-      errs.push('unexpected key: "' + dKeys[m] + '" (not in known schema)');
+    var KNOWN_KEYS = {
+      version:1, timestamp:1, idle_since:1, news:1,
+      israel_attack_warning:1, israel_actual_red_alerts:1,
+      attack_involves_missiles_not_just_uavs:1,
+      jerusalem_attack_warning:1, jerusalem_actual_red_alerts:1,
+      center_dan_or_yehuda_or_jerusalem_danger:1,
+      confirmed_center_attack_not_just_north_south:1,
+      any_threat:1, channels:1
+    };
+    var dKeys = Object.keys(d);
+    for(var m = 0; m < dKeys.length; m++){
+      if(!KNOWN_KEYS[dKeys[m]]){
+        errs.push('unexpected key: "' + dKeys[m] + '"');
+      }
     }
+  }catch(e){
+    errs.push('validation threw: ' + (e.message || String(e)));
   }
-
   return errs;
 }
 
 // ================================================================
 //  TIMER
 // ================================================================
+
 function updateTimer(){
-  var el = document.getElementById('timer-val');
-  if(!lastTimestamp){ el.textContent = '\u2014'; el.style.color='var(--dim)'; return; }
-  var diff = Math.floor((Date.now() - new Date(lastTimestamp).getTime())/1000);
-  if(diff < 0){ el.textContent = 'just now'; el.style.color='var(--dim)'; return; }
-  var m = Math.floor(diff/60), s = diff%60;
-  if(m >= 60){
-    var h = Math.floor(m/60);
-    el.textContent = h+'h '+String(m%60).padStart(2,'0')+'m ago';
-    el.style.color = 'var(--red)';
-  }else if(m >= 5){
-    el.textContent = m+'m '+String(s).padStart(2,'0')+'s ago';
-    el.style.color = 'var(--yellow)';
-  }else{
-    el.textContent = m+'m '+String(s).padStart(2,'0')+'s ago';
-    el.style.color = 'var(--dim)';
-  }
+  try{
+    var el = document.getElementById('timer-val');
+    if(!lastTimestamp){ el.textContent = '\u2014'; el.style.color='var(--dim)'; return; }
+    var diff = Math.floor((Date.now() - new Date(lastTimestamp).getTime()) / 1000);
+    if(diff < 0){ el.textContent = 'just now'; el.style.color='var(--dim)'; return; }
+    var m = Math.floor(diff / 60), s = diff % 60;
+    if(m >= 60){
+      var h = Math.floor(m / 60);
+      el.textContent = h + 'h ' + String(m % 60).padStart(2, '0') + 'm ago';
+      el.style.color = 'var(--red)';
+    }else if(m >= 5){
+      el.textContent = m + 'm ' + String(s).padStart(2, '0') + 's ago';
+      el.style.color = 'var(--yellow)';
+    }else{
+      el.textContent = m + 'm ' + String(s).padStart(2, '0') + 's ago';
+      el.style.color = 'var(--dim)';
+    }
+  }catch(e){}
 }
 
 function updateIdleTimer(){
-  var el = document.getElementById('idle-val');
-  // Empty idle_since = LLM is actively processing, or no data yet.
-  if(!lastIdleSince){
-    el.textContent = '\u2014';
-    el.style.color = 'var(--dim)';
-    return;
-  }
-  var diff = Math.floor((Date.now() - new Date(lastIdleSince).getTime())/1000);
-  if(diff < 2 || !isFinite(diff) || diff < 0){
-    // During active hours the LLM is idle for fractions of a second
-    // between queries. Show a dash to avoid confusing flicker of 0.
-    el.textContent = '\u2014';
-    el.style.color = 'var(--dim)';
-    return;
-  }
-  var m = Math.floor(diff/60), s = diff%60;
-  if(m >= 60){
-    var h = Math.floor(m/60);
-    el.textContent = h+'h '+String(m%60).padStart(2,'0')+'m';
-    el.style.color = 'var(--red)';
-  }else if(m >= 5){
-    el.textContent = m+'m '+String(s).padStart(2,'0')+'s';
-    el.style.color = 'var(--yellow)';
-  }else{
-    el.textContent = m+'m '+String(s).padStart(2,'0')+'s';
-    el.style.color = 'var(--dim)';
-  }
+  try{
+    var el = document.getElementById('idle-val');
+    if(!lastIdleSince){
+      el.textContent = '\u2014';
+      el.style.color = 'var(--dim)';
+      return;
+    }
+    var diff = Math.floor((Date.now() - new Date(lastIdleSince).getTime()) / 1000);
+    if(diff < 2 || !isFinite(diff) || diff < 0){
+      el.textContent = '\u2014';
+      el.style.color = 'var(--dim)';
+      return;
+    }
+    var m = Math.floor(diff / 60), s = diff % 60;
+    if(m >= 60){
+      var h = Math.floor(m / 60);
+      el.textContent = h + 'h ' + String(m % 60).padStart(2, '0') + 'm';
+      el.style.color = 'var(--red)';
+    }else if(m >= 5){
+      el.textContent = m + 'm ' + String(s).padStart(2, '0') + 's';
+      el.style.color = 'var(--yellow)';
+    }else{
+      el.textContent = m + 'm ' + String(s).padStart(2, '0') + 's';
+      el.style.color = 'var(--dim)';
+    }
+  }catch(e){}
 }
 
 // ================================================================
 //  RENDERING
 // ================================================================
-// Four visual groups for the threat panel.
-// {group:...} entries render as subheaders.
+
 var THREAT_ROWS = [
   {group:'All of Israel'},
   ['israel_attack_warning','Attack warning'],
@@ -738,39 +971,48 @@ var THREAT_ROWS = [
 ];
 
 function esc(s){
-  var d = document.createElement('div'); d.textContent = s; return d.innerHTML;
+  try{
+    var d = document.createElement('div');
+    d.textContent = s;
+    return d.innerHTML;
+  }catch(e){
+    return '';
+  }
 }
 
 function renderThreat(d){
-  var panel  = document.getElementById('threat-panel');
-  var header = document.getElementById('threat-header');
-  var bools  = document.getElementById('threat-bools');
-  // Strict boolean check — treat non-boolean any_threat as false
-  var anyThreat = d.any_threat === true;
-  if(anyThreat){
-    panel.className = 'alert';
-    header.innerHTML = '<span style="color:var(--red)">\u26A0 THREAT ALERT \u2014 WAKE UP \u26A0</span>';
-  }else{
-    panel.className = 'clear';
-    header.innerHTML = '<span style="color:var(--green)">ALL CLEAR</span>';
-  }
-  var html = '';
-  for(var i=0; i<THREAT_ROWS.length; i++){
-    var row = THREAT_ROWS[i];
-    if(row.group){
-      html += '<div class="bool-group-header">'+esc(row.group)+'</div>';
-      continue;
+  try{
+    var panel  = document.getElementById('threat-panel');
+    var header = document.getElementById('threat-header');
+    var bools  = document.getElementById('threat-bools');
+    var anyThreat = d.any_threat === true;
+    if(anyThreat){
+      panel.className = 'alert';
+      header.innerHTML = '<span style="color:var(--red)">\u26A0 THREAT ALERT \u2014 WAKE UP \u26A0</span>';
+    }else{
+      panel.className = 'clear';
+      header.innerHTML = '<span style="color:var(--green)">ALL CLEAR</span>';
     }
-    var key=row[0], label=row[1];
-    var reason = typeof d[key] === 'string' ? d[key] : '';
-    var active = reason.length > 0;
-    html += '<div class="bool-row"><span class="bool-badge '+(active?'yes':'no')+'">'
-      +(active?'YES':'no')+'</span><div class="bool-info"><span class="bool-label '
-      +(active?'active':'inactive')+'">'+esc(label)+'</span>'
-      +'<span class="bool-reason">'+(active?esc(reason):'')+'</span>'
-      +'</div></div>';
+    var html = '';
+    for(var i = 0; i < THREAT_ROWS.length; i++){
+      var row = THREAT_ROWS[i];
+      if(row.group){
+        html += '<div class="bool-group-header">' + esc(row.group) + '</div>';
+        continue;
+      }
+      var key = row[0], label = row[1];
+      var reason = typeof d[key] === 'string' ? d[key] : '';
+      var active = reason.length > 0;
+      html += '<div class="bool-row"><span class="bool-badge ' + (active ? 'yes' : 'no') + '">'
+        + (active ? 'YES' : 'no') + '</span><div class="bool-info"><span class="bool-label '
+        + (active ? 'active' : 'inactive') + '">' + esc(label) + '</span>'
+        + '<span class="bool-reason">' + (active ? esc(reason) : '') + '</span>'
+        + '</div></div>';
+    }
+    bools.innerHTML = html;
+  }catch(e){
+    console.error('[RENDER] renderThreat error:', e);
   }
-  bools.innerHTML = html;
 }
 
 function safeStr(v, fallback){
@@ -778,81 +1020,98 @@ function safeStr(v, fallback){
 }
 
 function renderNews(items){
-  var list = document.getElementById('news-list');
-  if(!Array.isArray(items) || !items.length){
-    list.innerHTML = '<div class="empty-msg">No notable updates</div>';
-    return;
-  }
-  var html = '';
-  for(var i=0; i<items.length; i++){
-    var it = items[i];
-    if(it === null || typeof it !== 'object' || Array.isArray(it)){
-      console.error('[RENDER] news[' + i + '] is not an object, skipping');
-      continue;
+  try{
+    var list = document.getElementById('news-list');
+    if(!Array.isArray(items) || !items.length){
+      list.innerHTML = '<div class="empty-msg">No notable updates</div>';
+      return;
     }
-    var importance = safeStr(it.importance, 'unknown');
-    var cls = importance.toLowerCase();
-    var headline = safeStr(it.headline, '(no headline)');
-    var channel = safeStr(it.channel, '(unknown channel)');
-    var summary = safeStr(it.summary, '');
-    var timeReport = safeStr(it.time_of_report);
-    var timeEvent = safeStr(it.time_of_event);
-    var timeStr = '';
-    if(timeReport) timeStr += ' \u00B7 reported '+esc(timeReport);
-    if(timeEvent) timeStr += ' \u00B7 event '+esc(timeEvent);
-    html += '<div class="news-card"><span class="tag '+cls+'">'+esc(importance)
-      +'</span><div class="headline">'+esc(headline)
-      +'</div><div class="channel">'+esc(channel)+timeStr
-      +'</div><div class="summary">'+esc(summary)+'</div></div>';
+    var html = '';
+    for(var i = 0; i < items.length; i++){
+      var it = items[i];
+      if(it === null || typeof it !== 'object' || Array.isArray(it)){
+        console.error('[RENDER] news[' + i + '] is not an object, skipping');
+        continue;
+      }
+      var importance = safeStr(it.importance, 'unknown');
+      var cls = importance.toLowerCase();
+      var headline = safeStr(it.headline, '(no headline)');
+      var channel = safeStr(it.channel, '(unknown channel)');
+      var summary = safeStr(it.summary, '');
+      var timeReport = safeStr(it.time_of_report);
+      var timeEvent = safeStr(it.time_of_event);
+      var timeStr = '';
+      if(timeReport) timeStr += ' \u00B7 reported ' + esc(timeReport);
+      if(timeEvent)  timeStr += ' \u00B7 event ' + esc(timeEvent);
+      html += '<div class="news-card"><span class="tag ' + cls + '">' + esc(importance)
+        + '</span><div class="headline">' + esc(headline)
+        + '</div><div class="channel">' + esc(channel) + timeStr
+        + '</div><div class="summary">' + esc(summary) + '</div></div>';
+    }
+    if(!html) html = '<div class="empty-msg">No renderable news items</div>';
+    list.innerHTML = html;
+  }catch(e){
+    console.error('[RENDER] renderNews error:', e);
   }
-  if(!html) html = '<div class="empty-msg">No renderable news items</div>';
-  list.innerHTML = html;
 }
 
 function fmtAgo(isoStr){
-  if(!isoStr) return '\u2014';
-  var diff = Math.floor((Date.now() - new Date(isoStr).getTime())/1000);
-  if(!isFinite(diff) || diff < 0) return 'just now';
-  if(diff < 60) return diff+'s ago';
-  var m = Math.floor(diff/60), s = diff%60;
-  if(m < 60) return m+'m '+String(s).padStart(2,'0')+'s ago';
-  var h = Math.floor(m/60);
-  return h+'h '+String(m%60).padStart(2,'0')+'m ago';
+  try{
+    if(!isoStr) return '\u2014';
+    var diff = Math.floor((Date.now() - new Date(isoStr).getTime()) / 1000);
+    if(!isFinite(diff) || diff < 0) return 'just now';
+    if(diff < 60) return diff + 's ago';
+    var m = Math.floor(diff / 60), s = diff % 60;
+    if(m < 60) return m + 'm ' + String(s).padStart(2, '0') + 's ago';
+    var h = Math.floor(m / 60);
+    return h + 'h ' + String(m % 60).padStart(2, '0') + 'm ago';
+  }catch(e){
+    return '?';
+  }
 }
 
 function renderChannels(channels){
-  var el = document.getElementById('channels-body');
-  if(!Array.isArray(channels) || !channels.length){
-    el.innerHTML = '<div class="empty-msg">No channels active</div>';
-    return;
+  try{
+    var el = document.getElementById('channels-body');
+    if(!Array.isArray(channels) || !channels.length){
+      el.innerHTML = '<div class="empty-msg">No channels active</div>';
+      return;
+    }
+    var html = '<table class="ch-table"><thead><tr>'
+      + '<th>Channel</th><th style="text-align:right">Messages</th>'
+      + '<th style="text-align:right">Latest</th></tr></thead><tbody>';
+    for(var i = 0; i < channels.length; i++){
+      var ch = channels[i];
+      html += '<tr><td class="ch-name">' + esc(safeStr(ch.name, '?'))
+        + '</td><td class="ch-count">' + ((ch.message_count || 0))
+        + '</td><td class="ch-time">' + esc(fmtAgo(ch.latest_message))
+        + '</td></tr>';
+    }
+    html += '</tbody></table>';
+    el.innerHTML = html;
+  }catch(e){
+    console.error('[RENDER] renderChannels error:', e);
   }
-  var html = '<table class="ch-table"><thead><tr>'
-    +'<th>Channel</th><th style="text-align:right">Messages</th>'
-    +'<th style="text-align:right">Latest</th></tr></thead><tbody>';
-  for(var i=0; i<channels.length; i++){
-    var ch = channels[i];
-    html += '<tr><td class="ch-name">'+esc(safeStr(ch.name,'?'))
-      +'</td><td class="ch-count">'+((ch.message_count||0))
-      +'</td><td class="ch-time">'+esc(fmtAgo(ch.latest_message))
-      +'</td></tr>';
-  }
-  html += '</tbody></table>';
-  el.innerHTML = html;
 }
 
 function showLoading(msg){
-  document.getElementById('news-list').innerHTML =
-    '<div id="loading"><div class="spinner"></div>'
-    +'<p style="margin-top:12px">'+msg+'</p></div>';
+  try{
+    document.getElementById('news-list').innerHTML =
+      '<div id="loading"><div class="spinner"></div>'
+      + '<p style="margin-top:12px">' + msg + '</p></div>';
+  }catch(e){}
 }
 
 function setConnStatus(cls, msg){
-  var bar = document.getElementById('conn-bar');
-  bar.className = cls; bar.textContent = msg;
+  try{
+    var bar = document.getElementById('conn-bar');
+    bar.className = cls;
+    bar.textContent = msg;
+  }catch(e){}
 }
 
 // ================================================================
-//  POLLING ENGINE
+//  POLLING ENGINE (XHR for smart TV compatibility)
 // ================================================================
 
 function schedulePoll(delayMs){
@@ -860,8 +1119,6 @@ function schedulePoll(delayMs){
   pollTimer = setTimeout(poll, delayMs);
 }
 
-// Uses XMLHttpRequest (not fetch/async/await/AbortController) for
-// maximum browser compatibility — works on old smart TV browsers.
 function poll(){
   if(pollInFlight){ schedulePoll(500); return; }
   pollInFlight = true;
@@ -871,33 +1128,62 @@ function poll(){
     schedulePoll(soundState === 'alarm' ? POLL_THREAT : POLL_NORMAL);
   }
 
-  function handleError(){
+  function handleError(reason){
     consecutiveFails++;
     if(consecutiveFails === 1){
-      setConnStatus('warn','Reconnecting\u2026');
+      setConnStatus('warn', 'Reconnecting\u2026');
     }else if(consecutiveFails >= 3){
-      setConnStatus('err','Connection lost \u2014 retrying\u2026 (' + consecutiveFails + ')');
+      setConnStatus('err', 'Connection lost \u2014 retrying\u2026 (' + consecutiveFails + ')');
     }
-    // Sound continues based on last known state. Intentional:
-    // if WiFi drops during an attack, alarm must NOT stop.
     finish();
   }
 
-  var xhr = new XMLHttpRequest();
-  // Cache-bust query param — most reliable way to prevent stale responses on old browsers.
-  xhr.open('GET', '/api/status?_=' + Date.now(), true);
+  var xhr;
+  try{
+    xhr = new XMLHttpRequest();
+  }catch(e){
+    console.error('[POLL] XMLHttpRequest constructor failed:', e);
+    handleError('xhr-ctor');
+    return;
+  }
+
+  try{
+    xhr.open('GET', '/api/status?_=' + Date.now(), true);
+  }catch(e){
+    console.error('[POLL] xhr.open failed:', e);
+    handleError('xhr-open');
+    return;
+  }
+
   xhr.timeout = FETCH_TIMEOUT;
   try{ xhr.setRequestHeader('Accept', 'application/json'); }catch(e){}
 
   xhr.onload = function(){
     try{
-      if(xhr.status < 200 || xhr.status >= 300) throw new Error('HTTP ' + xhr.status);
-      var d = JSON.parse(xhr.responseText);
+      if(xhr.status < 200 || xhr.status >= 300){
+        handleError('http-' + xhr.status);
+        return;
+      }
 
-      // ── VALIDATE PAYLOAD ──
+      var text = xhr.responseText;
+      if(!text){
+        handleError('empty-body');
+        return;
+      }
+
+      var d;
+      try{
+        d = JSON.parse(text);
+      }catch(e){
+        console.error('[POLL] JSON parse failed:', e);
+        handleError('json-parse');
+        return;
+      }
+
+      // Validate
       var vErrs = validatePayload(d);
       if(vErrs.length > 0){
-        for(var vi=0; vi<vErrs.length; vi++){
+        for(var vi = 0; vi < vErrs.length; vi++){
           console.error('[VALIDATION] ' + vErrs[vi]);
         }
         showValidationErrors(vErrs);
@@ -905,21 +1191,19 @@ function poll(){
         showValidationErrors([]);
       }
 
-      // If payload is not even an object, skip everything
       if(d === null || typeof d !== 'object' || Array.isArray(d)){
-        throw new Error('payload is not a JSON object');
+        handleError('not-object');
+        return;
       }
 
-      // ── SUCCESS ──
+      // Success
       var wasDown = consecutiveFails > 0;
       consecutiveFails = 0;
 
-      // Coerce version to number for safety (in case server sends string)
       var ver = typeof d.version === 'number' ? d.version : Number(d.version);
       if(!isFinite(ver)) ver = 0;
 
       if(ver > 0){
-        // Always update idle_since and channels on every poll (they change independently of version).
         lastIdleSince = typeof d.idle_since === 'string' ? d.idle_since : '';
         updateIdleTimer();
         renderChannels(Array.isArray(d.channels) ? d.channels : []);
@@ -933,23 +1217,16 @@ function poll(){
           renderThreat(d);
           renderNews(Array.isArray(d.news) ? d.news : []);
         }
-        setConnStatus('ok','');
-
-        // Drive sound from current state on EVERY successful poll,
-        // not just on version changes. This ensures sound tracks
-        // truth even if the version didn't change but we need to
-        // re-assert state (e.g. after tab foreground or reconnect).
+        setConnStatus('ok', '');
         updateSoundState(d);
-
       }else{
         if(everHadData){
-          setConnStatus('restarted','Server restarted \u2014 waiting for next LLM update\u2026');
+          setConnStatus('restarted', 'Server restarted \u2014 waiting for next LLM update\u2026');
         }else{
           showLoading('Waiting for first LLM update\u2026');
-          setConnStatus('ok','');
+          setConnStatus('ok', '');
         }
         lastVersion = -1;
-        // Don't touch sound — keep whatever was playing from last known state.
       }
 
       if(wasDown && lastData){
@@ -957,60 +1234,83 @@ function poll(){
         renderNews(Array.isArray(lastData.news) ? lastData.news : []);
       }
 
+      finish();
     }catch(e){
-      handleError();
-      return;
+      console.error('[POLL] Exception in onload:', e);
+      handleError('onload-exception');
     }
-    finish();
   };
 
-  xhr.onerror = handleError;
-  xhr.ontimeout = handleError;
+  xhr.onerror = function(){ handleError('network'); };
+  xhr.ontimeout = function(){ handleError('timeout'); };
 
-  try{ xhr.send(); }catch(e){ handleError(); }
+  try{ xhr.send(); }catch(e){
+    console.error('[POLL] xhr.send failed:', e);
+    handleError('send');
+  }
 }
 
 // ================================================================
 //  PAGE VISIBILITY
 // ================================================================
-document.addEventListener('visibilitychange', function(){
-  if(document.visibilityState === 'visible'){
-    ensureAudioCtx();
-    updateTimer();
-    updateIdleTimer();
-    // Re-assert sound state (AudioContext may have been suspended)
-    if(lastData) updateSoundState(lastData);
-    if(pollTimer !== null){ clearTimeout(pollTimer); pollTimer = null; }
-    schedulePoll(200);
-  }
-});
 
-window.addEventListener('pageshow', function(e){
-  if(e.persisted){
-    ensureAudioCtx();
-    updateTimer();
-    updateIdleTimer();
-    if(lastData) updateSoundState(lastData);
-    if(pollTimer !== null){ clearTimeout(pollTimer); pollTimer = null; }
-    schedulePoll(200);
-  }
-});
+try{
+  document.addEventListener('visibilitychange', function(){
+    try{
+      if(document.visibilityState === 'visible'){
+        updateTimer();
+        updateIdleTimer();
+        if(lastData) updateSoundState(lastData);
+        if(pollTimer !== null){ clearTimeout(pollTimer); pollTimer = null; }
+        schedulePoll(200);
+      }
+    }catch(e){
+      console.error('[VIS] visibilitychange handler error:', e);
+    }
+  });
+}catch(e){}
+
+try{
+  window.addEventListener('pageshow', function(e){
+    try{
+      if(e.persisted){
+        updateTimer();
+        updateIdleTimer();
+        if(lastData) updateSoundState(lastData);
+        if(pollTimer !== null){ clearTimeout(pollTimer); pollTimer = null; }
+        schedulePoll(200);
+      }
+    }catch(e2){
+      console.error('[VIS] pageshow handler error:', e2);
+    }
+  });
+}catch(e){}
 
 // ================================================================
 //  STARTUP
 // ================================================================
+
 function startPolling(){
-  if(timerHandle) clearInterval(timerHandle);
-  timerHandle = setInterval(function(){ updateTimer(); updateIdleTimer(); }, 1000);
-  updateTimer();
-  updateIdleTimer();
-  poll();
+  try{
+    if(timerHandle) clearInterval(timerHandle);
+    timerHandle = setInterval(function(){
+      updateTimer();
+      updateIdleTimer();
+    }, 1000);
+    updateTimer();
+    updateIdleTimer();
+    poll();
+  }catch(e){
+    console.error('[STARTUP] startPolling error:', e);
+  }
 }
 
-// Start fetching data immediately on page load — don't wait for unlock.
-// Data renders behind the welcome overlay so it's instant when dismissed.
-// Audio won't play until unlock() is called (Chrome autoplay policy).
-initAlarmElement();
+console.log('[STARTUP] News Alarm initializing');
+console.log('[STARTUP] UA: ' + (navigator.userAgent || 'unknown'));
+console.log('[STARTUP] canPlayType mp3: ' + (function(){ try{ return new Audio().canPlayType('audio/mpeg') || 'empty'; }catch(e){ return 'error'; } })());
+console.log('[STARTUP] canPlayType wav: ' + (function(){ try{ return new Audio().canPlayType('audio/wav') || 'empty'; }catch(e){ return 'error'; } })());
+
+preloadAudio();
 startPolling();
 
 })();
