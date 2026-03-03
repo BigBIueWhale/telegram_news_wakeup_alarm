@@ -109,7 +109,7 @@ html,body{height:100%;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Ro
   <div id="timer-row">
     <span>Last LLM update:</span>
     <span id="timer-val">&mdash;</span>
-    <span style="margin-left:16px">LLM idle:</span>
+    <span style="margin-left:16px">Telegram silent:</span>
     <span id="idle-val">&mdash;</span>
   </div>
 
@@ -380,7 +380,7 @@ var EXPECTED_BOOL_KEYS = [
   'israel_actual_red_alerts',
   'jerusalem_attack_warning',
   'jerusalem_actual_red_alerts',
-  'center_dan_or_or_yehuda_or_jerusalem_danger',
+  'center_dan_or_yehuda_or_jerusalem_danger',
   'evidence_for_jerusalem_or_center_or_yehuda_not_just_north_or_south',
   'any_threat'
 ];
@@ -476,7 +476,7 @@ function validatePayload(d){
     version:1, timestamp:1, idle_since:1, news:1,
     israel_attack_warning:1, israel_actual_red_alerts:1,
     jerusalem_attack_warning:1, jerusalem_actual_red_alerts:1,
-    center_dan_or_or_yehuda_or_jerusalem_danger:1,
+    center_dan_or_yehuda_or_jerusalem_danger:1,
     evidence_for_jerusalem_or_center_or_yehuda_not_just_north_or_south:1,
     any_threat:1
   };
@@ -550,7 +550,7 @@ var BOOLS = [
   ['israel_actual_red_alerts','Israel red alerts active'],
   ['jerusalem_attack_warning','Jerusalem attack warning'],
   ['jerusalem_actual_red_alerts','Jerusalem red alerts active'],
-  ['center_dan_or_or_yehuda_or_jerusalem_danger','Center / Dan / Or Yehuda / Jerusalem danger'],
+  ['center_dan_or_yehuda_or_jerusalem_danger','Center / Dan / Yehuda / Jerusalem danger'],
   ['evidence_for_jerusalem_or_center_or_yehuda_not_just_north_or_south','Evidence for Jlem / Center / Yehuda (not just N/S)']
 ];
 

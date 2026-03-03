@@ -36,7 +36,7 @@ struct NewsOutput {
     #[serde(default)]
     jerusalem_actual_red_alerts: bool,
     #[serde(default)]
-    center_dan_or_or_yehuda_or_jerusalem_danger: bool,
+    center_dan_or_yehuda_or_jerusalem_danger: bool,
     #[serde(default)]
     evidence_for_jerusalem_or_center_or_yehuda_not_just_north_or_south: bool,
 }
@@ -418,7 +418,7 @@ fn build_prompt_text(
   "israel_actual_red_alerts": false,
   "jerusalem_attack_warning": false,
   "jerusalem_actual_red_alerts": false,
-  "center_dan_or_or_yehuda_or_jerusalem_danger": false,
+  "center_dan_or_yehuda_or_jerusalem_danger": false,
   "evidence_for_jerusalem_or_center_or_yehuda_not_just_north_or_south": false,
   "updates": [
     {{
@@ -446,7 +446,7 @@ ONCE A DANGER HAS PASSED, ALL BOOLEANS MUST RETURN TO FALSE. If messages describ
 - israel_actual_red_alerts: TRUE if Pikud HaOref (Home Front Command) has activated actual red alert sirens ANYWHERE in Israel, or if credible sources report active sirens/interceptions RIGHT NOW.
 - jerusalem_attack_warning: TRUE if there is ANY warning or credible report specifically mentioning Jerusalem as a target or at-risk area. Also TRUE if merkaz/center Israel is targeted (missiles to merkaz pass directly over Jerusalem).
 - jerusalem_actual_red_alerts: TRUE if red alert sirens are active specifically in Jerusalem RIGHT NOW.
-- center_dan_or_or_yehuda_or_jerusalem_danger: TRUE if any of these areas are at IMMINENT risk: Gush Dan, Or Yehuda, Jerusalem, Merkaz (center Israel). Even if the target is Merkaz and not explicitly Jerusalem, set this TRUE because the flight path crosses over Jerusalem.
+- center_dan_or_yehuda_or_jerusalem_danger: TRUE if any of these areas are at IMMINENT risk: Gush Dan, Yehuda, Jerusalem, Merkaz (center Israel). Even if the target is Merkaz and not explicitly Jerusalem, set this TRUE because the flight path crosses over Jerusalem.
 - evidence_for_jerusalem_or_center_or_yehuda_not_just_north_or_south: THIS BOOLEAN TRIGGERS A LOUD ALARM THAT WAKES A SLEEPING PERSON. It requires CONFIRMED evidence that an attack is actually happening or confirmed launched toward central Israel — not speculation, not "might happen", not political tension. Early warning (10-15 min before impact) is GOOD and desired, but only if the attack is CONFIRMED (e.g. launches detected, missiles in the air, credible military sources confirm an ongoing strike). Set FALSE if: the danger has passed, the attack is over, only northern or southern areas are affected, or you are guessing/speculating without concrete reports. Set TRUE if: (a) credible sources confirm central Israel / Merkaz / Gush Dan / Tel Aviv / Jerusalem / Yehuda is under active attack or confirmed incoming strike, OR (b) a confirmed attack is underway with broad/unspecified targeting where center cannot be ruled out, OR (c) both north AND center are confirmed targeted simultaneously.
 
 IMPORTANT CONTEXT: Pikud HaOref often fails to give Jerusalem explicit early warning. By the time Jerusalem gets an actual siren (~1.5 min warning), Iranian missiles may already be overhead on their way to Merkaz. The user needs ~7 minutes from EARLY WARNING to reach shelter. Therefore: err on the side of TRUE for any boolean where there is reasonable doubt about an ACTIVE threat. A false positive (unnecessary wake-up) is infinitely better than a false negative (sleeping through an attack). But do NOT set booleans TRUE for past events, historical analysis, or speculative future threats — only for RIGHT NOW.
@@ -648,7 +648,7 @@ fn process_and_print_output(raw_response: &str, web_state: &SharedWebState) {
                 || output.israel_actual_red_alerts
                 || output.jerusalem_attack_warning
                 || output.jerusalem_actual_red_alerts
-                || output.center_dan_or_or_yehuda_or_jerusalem_danger
+                || output.center_dan_or_yehuda_or_jerusalem_danger
                 || output.evidence_for_jerusalem_or_center_or_yehuda_not_just_north_or_south;
 
             let now = Utc::now().with_timezone(&TZ_JERUSALEM).format("%H:%M:%S");
@@ -671,7 +671,7 @@ fn process_and_print_output(raw_response: &str, web_state: &SharedWebState) {
             println!("{}", fmt_threat_bool("Israel red alerts active", output.israel_actual_red_alerts));
             println!("{}", fmt_threat_bool("Jerusalem attack warning", output.jerusalem_attack_warning));
             println!("{}", fmt_threat_bool("Jerusalem red alerts active", output.jerusalem_actual_red_alerts));
-            println!("{}", fmt_threat_bool("Center/Dan/Or Yehuda/Jerusalem danger", output.center_dan_or_or_yehuda_or_jerusalem_danger));
+            println!("{}", fmt_threat_bool("Center/Dan/Yehuda/Jerusalem danger", output.center_dan_or_yehuda_or_jerusalem_danger));
             println!("{}", fmt_threat_bool("Evidence for Jlem/Center/Yehuda (not just N/S)", output.evidence_for_jerusalem_or_center_or_yehuda_not_just_north_or_south));
             println!("  {DIM}─────────────────────────────────────────{RESET}");
             println!();
@@ -707,7 +707,7 @@ fn process_and_print_output(raw_response: &str, web_state: &SharedWebState) {
                 ws.israel_actual_red_alerts = output.israel_actual_red_alerts;
                 ws.jerusalem_attack_warning = output.jerusalem_attack_warning;
                 ws.jerusalem_actual_red_alerts = output.jerusalem_actual_red_alerts;
-                ws.center_dan_or_or_yehuda_or_jerusalem_danger = output.center_dan_or_or_yehuda_or_jerusalem_danger;
+                ws.center_dan_or_yehuda_or_jerusalem_danger = output.center_dan_or_yehuda_or_jerusalem_danger;
                 ws.evidence_for_jerusalem_or_center_or_yehuda_not_just_north_or_south = output.evidence_for_jerusalem_or_center_or_yehuda_not_just_north_or_south;
                 ws.any_threat = any_threat;
                 ws.news = output.updates.iter().map(|it| WebNewsItem {
