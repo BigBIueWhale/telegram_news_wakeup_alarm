@@ -34,6 +34,8 @@ pub struct WebUpdate {
     pub idle_since: String,
     /// News items from the last LLM response.
     pub news: Vec<WebNewsItem>,
+    /// Active channel buffer info (updated every snapshot, not just on LLM response).
+    pub channels: Vec<WebChannelInfo>,
 }
 
 #[derive(Clone, Serialize)]
@@ -44,6 +46,14 @@ pub struct WebNewsItem {
     pub time_of_report: String,
     pub time_of_event: String,
     pub summary: String,
+}
+
+#[derive(Clone, Serialize)]
+pub struct WebChannelInfo {
+    pub name: String,
+    pub message_count: usize,
+    /// ISO-8601 timestamp of the newest message in this channel's buffer.
+    pub latest_message: String,
 }
 
 pub type SharedWebState = Arc<RwLock<WebUpdate>>;

@@ -91,6 +91,19 @@ html,body{height:100%;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Ro
   max-height:30vh;overflow-y:auto;display:none;border-top:2px solid #f90}
 #validation-bar.visible{display:block}
 
+/* Channels table */
+#channels-section{margin-top:24px}
+#channels-header{font-size:1rem;font-weight:600;color:var(--magenta);margin-bottom:10px}
+.ch-table{width:100%;border-collapse:collapse;font-size:.85rem}
+.ch-table th{text-align:left;color:var(--dim);font-weight:600;font-size:.75rem;
+  text-transform:uppercase;letter-spacing:.04em;padding:6px 10px;
+  border-bottom:1px solid var(--border)}
+.ch-table td{padding:8px 10px;border-bottom:1px solid var(--border)}
+.ch-table tr:last-child td{border-bottom:none}
+.ch-name{color:var(--text);font-weight:500}
+.ch-count{color:var(--cyan);font-variant-numeric:tabular-nums;text-align:right}
+.ch-time{color:var(--dim);font-variant-numeric:tabular-nums;text-align:right;white-space:nowrap}
+
 /* Loading skeleton */
 #loading{text-align:center;padding:3rem 0;color:var(--dim)}
 #loading .spinner{display:inline-block;width:32px;height:32px;border:3px solid var(--border);
@@ -130,6 +143,11 @@ html,body{height:100%;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Ro
     <div id="news-list">
       <div id="loading"><div class="spinner"></div><p style="margin-top:12px">Waiting for first update&hellip;</p></div>
     </div>
+  </div>
+
+  <div id="channels-section">
+    <div id="channels-header">Monitored Channels</div>
+    <div id="channels-body"></div>
   </div>
 </div>
 
@@ -500,7 +518,7 @@ function validatePayload(d){
     jerusalem_attack_warning:1, jerusalem_actual_red_alerts:1,
     center_dan_or_yehuda_or_jerusalem_danger:1,
     confirmed_center_attack_not_just_north_south:1,
-    any_threat:1
+    any_threat:1, channels:1
   };
   var dKeys = Object.keys(d);
   for(var m=0; m<dKeys.length; m++){
@@ -654,6 +672,37 @@ function renderNews(items){
   list.innerHTML = html;
 }
 
+function fmtAgo(isoStr){
+  if(!isoStr) return '\u2014';
+  var diff = Math.floor((Date.now() - new Date(isoStr).getTime())/1000);
+  if(!isFinite(diff) || diff < 0) return 'just now';
+  if(diff < 60) return diff+'s ago';
+  var m = Math.floor(diff/60), s = diff%60;
+  if(m < 60) return m+'m '+String(s).padStart(2,'0')+'s ago';
+  var h = Math.floor(m/60);
+  return h+'h '+String(m%60).padStart(2,'0')+'m ago';
+}
+
+function renderChannels(channels){
+  var el = document.getElementById('channels-body');
+  if(!Array.isArray(channels) || !channels.length){
+    el.innerHTML = '<div class="empty-msg">No channels active</div>';
+    return;
+  }
+  var html = '<table class="ch-table"><thead><tr>'
+    +'<th>Channel</th><th style="text-align:right">Messages</th>'
+    +'<th style="text-align:right">Latest</th></tr></thead><tbody>';
+  for(var i=0; i<channels.length; i++){
+    var ch = channels[i];
+    html += '<tr><td class="ch-name">'+esc(safeStr(ch.name,'?'))
+      +'</td><td class="ch-count">'+((ch.message_count||0))
+      +'</td><td class="ch-time">'+esc(fmtAgo(ch.latest_message))
+      +'</td></tr>';
+  }
+  html += '</tbody></table>';
+  el.innerHTML = html;
+}
+
 function showLoading(msg){
   document.getElementById('news-list').innerHTML =
     '<div id="loading"><div class="spinner"></div>'
@@ -717,9 +766,10 @@ async function poll(){
     if(!isFinite(ver)) ver = 0;
 
     if(ver > 0){
-      // Always update idle_since on every successful poll (it changes independently of version).
+      // Always update idle_since and channels on every poll (they change independently of version).
       lastIdleSince = typeof d.idle_since === 'string' ? d.idle_since : '';
       updateIdleTimer();
+      renderChannels(Array.isArray(d.channels) ? d.channels : []);
 
       var isNew = (ver !== lastVersion);
       if(isNew){

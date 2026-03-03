@@ -1,6 +1,6 @@
 use crate::buffer::{ChannelMessage, ChannelBuffers, ChannelSnapshot};
 use crate::ollama::OllamaClient;
-use crate::web::{SharedWebState, WebNewsItem};
+use crate::web::{SharedWebState, WebChannelInfo, WebNewsItem};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use chrono_tz::Asia::Jerusalem as TZ_JERUSALEM;
@@ -124,6 +124,24 @@ pub async fn run_loop(
             snapshot.len(),
             total_msgs
         );
+
+        // Update channel buffer info in web state on every snapshot.
+        {
+            let mut channels: Vec<WebChannelInfo> = snapshot
+                .iter()
+                .map(|s| WebChannelInfo {
+                    name: s.channel_title.clone(),
+                    message_count: s.messages.len(),
+                    latest_message: s
+                        .messages
+                        .last()
+                        .map(|m| m.date.to_rfc3339())
+                        .unwrap_or_default(),
+                })
+                .collect();
+            channels.sort_by(|a, b| b.latest_message.cmp(&a.latest_message));
+            web_state.write().expect("web state lock poisoned").channels = channels;
+        }
 
         // Wait if no messages have arrived yet.
         if snapshot.is_empty() {
