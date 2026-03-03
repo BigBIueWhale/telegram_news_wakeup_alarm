@@ -24,7 +24,7 @@ pub struct WebUpdate {
     pub jerusalem_attack_warning: String,
     pub jerusalem_actual_red_alerts: String,
     pub center_dan_or_yehuda_or_jerusalem_danger: String,
-    pub evidence_for_jerusalem_or_center_or_yehuda_not_just_north_or_south: String,
+    pub confirmed_center_attack_not_just_north_south: String,
     pub any_threat: bool,
     /// ISO-8601 timestamp of when the LLM became idle (waiting for new messages).
     /// Empty string means the LLM is currently processing.

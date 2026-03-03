@@ -161,7 +161,7 @@ var everHadData    = false;
 //
 //  Three mutually-exclusive sound states, driven by booleans:
 //
-//    'alarm'  — evidence_for_jerusalem_or_center_or_yehuda boolean
+//    'alarm'  — confirmed_center_attack_not_just_north_south
 //               is TRUE. alarm.wav loops at max volume until it
 //               goes FALSE. This is the wake-up-or-die sound.
 //
@@ -318,7 +318,7 @@ function updateSoundState(data){
   // evidence_for_... is now a string — non-empty triggers alarm.
   // any_threat is still a boolean.
   var target;
-  var evidence = data.evidence_for_jerusalem_or_center_or_yehuda_not_just_north_or_south;
+  var evidence = data.confirmed_center_attack_not_just_north_south;
   if(typeof evidence === 'string' && evidence.length > 0){
     target = 'alarm';
   }else if(data.any_threat === true){
@@ -387,7 +387,7 @@ var EXPECTED_THREAT_STRING_KEYS = [
   'jerusalem_attack_warning',
   'jerusalem_actual_red_alerts',
   'center_dan_or_yehuda_or_jerusalem_danger',
-  'evidence_for_jerusalem_or_center_or_yehuda_not_just_north_or_south'
+  'confirmed_center_attack_not_just_north_south'
 ];
 // any_threat remains a boolean (computed server-side).
 var EXPECTED_BOOL_KEYS = ['any_threat'];
@@ -494,7 +494,7 @@ function validatePayload(d){
     israel_attack_warning:1, israel_actual_red_alerts:1,
     jerusalem_attack_warning:1, jerusalem_actual_red_alerts:1,
     center_dan_or_yehuda_or_jerusalem_danger:1,
-    evidence_for_jerusalem_or_center_or_yehuda_not_just_north_or_south:1,
+    confirmed_center_attack_not_just_north_south:1,
     any_threat:1
   };
   var dKeys = Object.keys(d);
@@ -568,7 +568,7 @@ var BOOLS = [
   ['jerusalem_attack_warning','Jerusalem attack warning'],
   ['jerusalem_actual_red_alerts','Jerusalem red alerts active'],
   ['center_dan_or_yehuda_or_jerusalem_danger','Center / Dan / Yehuda / Jerusalem danger'],
-  ['evidence_for_jerusalem_or_center_or_yehuda_not_just_north_or_south','Evidence for Jlem / Center / Yehuda (not just N/S)']
+  ['confirmed_center_attack_not_just_north_south','Confirmed attack on Center / Jerusalem / Gush Dan / Yehuda (not just N/S)']
 ];
 
 function esc(s){
