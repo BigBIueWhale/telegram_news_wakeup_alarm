@@ -24,6 +24,19 @@ const MIN_MESSAGES_TO_PROCESS: usize = 1;
 #[derive(Deserialize, Debug)]
 struct NewsOutput {
     updates: Vec<NewsItem>,
+    // Threat assessment booleans — the whole point of this alarm system.
+    #[serde(default)]
+    israel_attack_warning: bool,
+    #[serde(default)]
+    israel_actual_red_alerts: bool,
+    #[serde(default)]
+    jerusalem_attack_warning: bool,
+    #[serde(default)]
+    jerusalem_actual_red_alerts: bool,
+    #[serde(default)]
+    center_dan_or_or_yehuda_or_jerusalem_danger: bool,
+    #[serde(default)]
+    evidence_for_jerusalem_or_center_or_yehuda_not_just_north_or_south: bool,
 }
 
 #[derive(Deserialize, Debug)]
@@ -358,6 +371,12 @@ fn build_prompt_text(
         r#"Respond with ONLY a JSON object in the exact format below. No other text before or after the JSON.
 
 {{
+  "israel_attack_warning": false,
+  "israel_actual_red_alerts": false,
+  "jerusalem_attack_warning": false,
+  "jerusalem_actual_red_alerts": false,
+  "center_dan_or_or_yehuda_or_jerusalem_danger": false,
+  "evidence_for_jerusalem_or_center_or_yehuda_not_just_north_or_south": false,
   "updates": [
     {{
       "channel": "channel name",
@@ -373,10 +392,22 @@ fn build_prompt_text(
   }}
 }}
 
+CRITICAL — THREAT ASSESSMENT BOOLEANS:
+The six boolean fields at the top are the PRIMARY PURPOSE of this system. They are used to wake someone sleeping in Jerusalem to reach a bomb shelter in time. Set them based on ANY evidence in the messages — even a single credible report is enough.
+
+- israel_attack_warning: TRUE if there is ANY early warning, intelligence, or credible report of an incoming or imminent attack on Israel (missiles, drones, rockets from Iran, Hezbollah, Yemen, etc.). Includes launch detections, military alerts, and "prepare for attack" announcements.
+- israel_actual_red_alerts: TRUE if Pikud HaOref (Home Front Command) has activated actual red alert sirens ANYWHERE in Israel, or if credible sources report active sirens/interceptions.
+- jerusalem_attack_warning: TRUE if there is ANY warning or credible report specifically mentioning Jerusalem as a target or at-risk area. Also TRUE if merkaz/center Israel is targeted (missiles to merkaz pass directly over Jerusalem).
+- jerusalem_actual_red_alerts: TRUE if red alert sirens are active specifically in Jerusalem.
+- center_dan_or_or_yehuda_or_jerusalem_danger: TRUE if any of these areas are at risk: Gush Dan, Or Yehuda, Jerusalem, Merkaz (center Israel). Even if the target is Merkaz and not explicitly Jerusalem, set this TRUE because the flight path crosses over Jerusalem.
+- evidence_for_jerusalem_or_center_or_yehuda_not_just_north_or_south: TRUE if the evidence suggests the attack targets Jerusalem, Merkaz, Gush Dan, Yehuda, or areas in their immediate vicinity — and NOT exclusively the far north or far south. Set FALSE if the ONLY areas mentioned are north of Netanya (Haifa, Galilee, Golan, Tiberias, Acre, etc.) or are Negev/Eilat/Yam HaMelach (Dead Sea) with no mention of Yehuda or areas close to Jerusalem. Set TRUE if: (a) central Israel / Merkaz / Gush Dan / Tel Aviv / Jerusalem / Yehuda are mentioned, OR (b) the target is ambiguous/broad ("missiles at Israel" with no specific region), OR (c) both north AND center are targeted. The key question: "Could these missiles endanger someone in Jerusalem?" — if yes or uncertain, TRUE.
+
+IMPORTANT CONTEXT: Pikud HaOref often fails to give Jerusalem explicit early warning. By the time Jerusalem gets an actual siren (~1.5 min warning), Iranian missiles may already be overhead on their way to Merkaz. The user needs ~7 minutes from EARLY WARNING to reach shelter. Therefore: err on the side of TRUE for any boolean where there is reasonable doubt. A false positive (unnecessary wake-up) is infinitely better than a false negative (sleeping through an attack).
+
 Rules:
 - Include ONLY genuinely notable news updates from the last {focus_minutes} minutes
-- If nothing notable happened, return {{"updates": [], "meta": {{...}}}}
-- Be information-dense and incredibly brief
+- If nothing notable happened, return all booleans as false with empty updates array
+- Be information-dense and incredibly brief in summaries
 - Categorize importance: critical (breaking/urgent), high (significant), medium (noteworthy), low (minor)
 - Output ONLY valid JSON, nothing else"#,
         num_channels = num_channels,
@@ -520,6 +551,41 @@ fn binary_search_window(
     best
 }
 
+// ── ANSI color constants ──
+
+const RESET: &str = "\x1b[0m";
+const BOLD: &str = "\x1b[1m";
+const DIM: &str = "\x1b[2m";
+const YELLOW: &str = "\x1b[33m";
+const BLUE: &str = "\x1b[34m";
+const MAGENTA: &str = "\x1b[35m";
+const CYAN: &str = "\x1b[36m";
+const WHITE: &str = "\x1b[37m";
+const BG_RED: &str = "\x1b[41m";
+const BRIGHT_RED: &str = "\x1b[91m";
+const BRIGHT_GREEN: &str = "\x1b[92m";
+const BRIGHT_YELLOW: &str = "\x1b[93m";
+
+/// Format a single threat boolean as a colored line.
+fn fmt_threat_bool(label: &str, value: bool) -> String {
+    if value {
+        format!("  {BOLD}{BG_RED}{WHITE}  YES  {RESET}  {BOLD}{BRIGHT_RED}{label}{RESET}")
+    } else {
+        format!("  {DIM}{BRIGHT_GREEN}  no   {RESET}  {DIM}{label}{RESET}")
+    }
+}
+
+/// Return an ANSI color code for the given importance level.
+fn importance_color(importance: &str) -> &'static str {
+    match importance.to_lowercase().as_str() {
+        "critical" => BRIGHT_RED,
+        "high" => BRIGHT_YELLOW,
+        "medium" => CYAN,
+        "low" => DIM,
+        _ => WHITE,
+    }
+}
+
 // ── Output processing ──
 
 /// Parse the LLM response as JSON, print a human-readable summary to stdout.
@@ -530,28 +596,53 @@ fn process_and_print_output(raw_response: &str) {
 
     match serde_json::from_str::<NewsOutput>(json_str) {
         Ok(output) => {
-            if output.updates.is_empty() {
-                println!(
-                    "[{}] No notable updates in the last {} minutes",
-                    Utc::now().format("%H:%M:%S UTC"),
-                    FOCUS_MINUTES
-                );
+            let any_threat = output.israel_attack_warning
+                || output.israel_actual_red_alerts
+                || output.jerusalem_attack_warning
+                || output.jerusalem_actual_red_alerts
+                || output.center_dan_or_or_yehuda_or_jerusalem_danger
+                || output.evidence_for_jerusalem_or_center_or_yehuda_not_just_north_or_south;
+
+            let now = Utc::now().format("%H:%M:%S UTC");
+
+            // ── Threat assessment panel (always shown) ──
+            println!();
+            if any_threat {
+                println!("{BOLD}{BG_RED}{WHITE}                                                            {RESET}");
+                println!("{BOLD}{BG_RED}{WHITE}          !! THREAT ALERT — WAKE UP !!                      {RESET}");
+                println!("{BOLD}{BG_RED}{WHITE}                                                            {RESET}");
             } else {
-                println!(
-                    "\n=== NEWS UPDATE [{}] ({} items) ===",
-                    Utc::now().format("%H:%M:%S UTC"),
-                    output.updates.len()
-                );
+                println!("{DIM}───────────────────────────────────────────────{RESET}");
+                println!("  {BOLD}{BRIGHT_GREEN}ALL CLEAR{RESET}  {DIM}[{now}]{RESET}");
+                println!("{DIM}───────────────────────────────────────────────{RESET}");
+            }
+            println!();
+            println!("  {BOLD}{MAGENTA}Threat Assessment{RESET}");
+            println!("  {DIM}─────────────────────────────────────────{RESET}");
+            println!("{}", fmt_threat_bool("Israel attack warning", output.israel_attack_warning));
+            println!("{}", fmt_threat_bool("Israel red alerts active", output.israel_actual_red_alerts));
+            println!("{}", fmt_threat_bool("Jerusalem attack warning", output.jerusalem_attack_warning));
+            println!("{}", fmt_threat_bool("Jerusalem red alerts active", output.jerusalem_actual_red_alerts));
+            println!("{}", fmt_threat_bool("Center/Dan/Or Yehuda/Jerusalem danger", output.center_dan_or_or_yehuda_or_jerusalem_danger));
+            println!("{}", fmt_threat_bool("Evidence for Jlem/Center/Yehuda (not just N/S)", output.evidence_for_jerusalem_or_center_or_yehuda_not_just_north_or_south));
+            println!("  {DIM}─────────────────────────────────────────{RESET}");
+            println!();
+
+            // ── News items ──
+            if output.updates.is_empty() {
+                println!("  {DIM}No notable updates in the last {FOCUS_MINUTES} minutes{RESET}");
+                println!();
+            } else {
+                println!("  {BOLD}{BLUE}News Updates{RESET}  {DIM}({} items — last {FOCUS_MINUTES} min){RESET}", output.updates.len());
+                println!();
                 for item in &output.updates {
-                    println!(
-                        "  [{}] {} — {}\n         {}",
-                        item.importance.to_uppercase(),
-                        item.channel,
-                        item.headline,
-                        item.summary
-                    );
+                    let color = importance_color(&item.importance);
+                    let tag = item.importance.to_uppercase();
+                    println!("  {BOLD}{color}[{tag}]{RESET}  {BOLD}{}{RESET}", item.headline);
+                    println!("         {DIM}{YELLOW}{}{RESET}", item.channel);
+                    println!("         {}", item.summary);
+                    println!();
                 }
-                println!("=== END UPDATE ===\n");
             }
         }
         Err(e) => {
@@ -562,7 +653,7 @@ fn process_and_print_output(raw_response: &str) {
                 &cleaned[..500.min(cleaned.len())]
             );
             println!(
-                "[{}] (raw) {}",
+                "{YELLOW}[{}] (raw){RESET} {}",
                 Utc::now().format("%H:%M:%S UTC"),
                 cleaned.trim()
             );
