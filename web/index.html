@@ -102,7 +102,9 @@ html,body{height:100%;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Ro
 #validation-bar.visible{display:block}
 
 /* Channels table */
-#channels-section{margin-top:24px}
+#channels-section{margin-top:24px;border-left:3px solid transparent;padding-left:8px;transition:border-color .5s,opacity .5s}
+#channels-section.stale-warn{border-left-color:var(--yellow);opacity:.8}
+#channels-section.stale-danger{border-left-color:var(--red);opacity:.6}
 #channels-header{font-size:1rem;font-weight:600;color:var(--magenta);margin-bottom:10px}
 .ch-table{width:100%;border-collapse:collapse;font-size:.85rem}
 .ch-table th{text-align:left;color:var(--dim);font-weight:600;font-size:.75rem;
@@ -180,10 +182,9 @@ html,body{height:100%;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Ro
 
 <div id="app">
   <div id="timer-row">
-    <span>Last LLM update:</span>
-    <span id="timer-val">&mdash;</span>
-    <span style="margin-left:16px">Telegram silent:</span>
-    <span id="idle-val">&mdash;</span>
+    <span id="timer-val">Displayed data &mdash;</span>
+    <span style="margin-left:16px">Generating:</span>
+    <span id="gen-val">&mdash;</span>
   </div>
 
   <div id="columns">
@@ -401,16 +402,19 @@ var FETCH_TIMEOUT = 8000;
 // ================================================================
 //  STATE
 // ================================================================
-var audioUnlocked   = false;
-var lastVersion     = -1;
-var lastTimestamp    = null;
-var lastIdleSince   = '';
-var lastData        = null;
-var consecutiveFails = 0;
-var pollTimer       = null;
-var pollInFlight    = false;
-var timerHandle     = null;
-var everHadData     = false;
+var audioUnlocked       = false;
+var lastVersion         = -1;
+var lastDataCollectedAt = null;
+var lastGeneratingSince = '';
+var lastData            = null;
+var consecutiveFails    = 0;
+var pollTimer           = null;
+var pollInFlight        = false;
+var timerHandle         = null;
+var everHadData         = false;
+// Channels: store raw data + last server update time for client-side ticking/staleness
+var lastChannelsData       = [];
+var lastChannelsUpdateTime = 0;
 
 // ================================================================
 //  AUDIO ENGINE
@@ -723,14 +727,14 @@ function validatePayload(d){
       errs.push('version: expected non-negative, got ' + d.version);
     }
 
-    if(typeof d.timestamp !== 'string'){
-      errs.push('timestamp: expected string, got ' + typeof d.timestamp);
-    }else if(d.version > 0 && d.timestamp.length === 0){
-      errs.push('timestamp: empty string on a non-zero version (' + d.version + ')');
+    if(typeof d.data_collected_at !== 'string'){
+      errs.push('data_collected_at: expected string, got ' + typeof d.data_collected_at);
+    }else if(d.version > 0 && d.data_collected_at.length === 0){
+      errs.push('data_collected_at: empty string on a non-zero version (' + d.version + ')');
     }
 
-    if(typeof d.idle_since !== 'string'){
-      errs.push('idle_since: expected string, got ' + typeof d.idle_since);
+    if(typeof d.generating_since !== 'string'){
+      errs.push('generating_since: expected string, got ' + typeof d.generating_since);
     }
 
     for(var i = 0; i < EXPECTED_THREAT_STRING_KEYS.length; i++){
@@ -776,7 +780,7 @@ function validatePayload(d){
     }
 
     var KNOWN_KEYS = {
-      version:1, timestamp:1, idle_since:1, news:1,
+      version:1, data_collected_at:1, generating_since:1, news:1,
       israel_attack_warning:1, israel_actual_red_alerts:1,
       attack_involves_missiles_not_just_uavs:1,
       jerusalem_attack_warning:1, jerusalem_actual_red_alerts:1,
@@ -803,49 +807,75 @@ function validatePayload(d){
 function updateTimer(){
   try{
     var el = document.getElementById('timer-val');
-    if(!lastTimestamp){ el.textContent = '\u2014'; el.style.color='var(--dim)'; return; }
-    var diff = Math.floor((Date.now() - new Date(lastTimestamp).getTime()) / 1000);
-    if(diff < 0){ el.textContent = 'just now'; el.style.color='var(--dim)'; return; }
+    if(!lastDataCollectedAt){
+      el.textContent = 'Displayed data \u2014';
+      el.style.color='var(--dim)';
+      return;
+    }
+    var diff = Math.floor((Date.now() - new Date(lastDataCollectedAt).getTime()) / 1000);
+    if(diff < 0){
+      el.textContent = 'Displayed data just now';
+      el.style.color='var(--dim)';
+      return;
+    }
     var m = Math.floor(diff / 60), s = diff % 60;
+    var age;
     if(m >= 60){
       var h = Math.floor(m / 60);
-      el.textContent = h + 'h ' + String(m % 60).padStart(2, '0') + 'm ago';
+      age = h + 'h ' + String(m % 60).padStart(2, '0') + 'm';
       el.style.color = 'var(--red)';
     }else if(m >= 5){
-      el.textContent = m + 'm ' + String(s).padStart(2, '0') + 's ago';
+      age = m + 'm ' + String(s).padStart(2, '0') + 's';
       el.style.color = 'var(--yellow)';
     }else{
-      el.textContent = m + 'm ' + String(s).padStart(2, '0') + 's ago';
+      age = m + 'm ' + String(s).padStart(2, '0') + 's';
       el.style.color = 'var(--dim)';
     }
+    el.textContent = 'Displayed data ' + age + ' old';
   }catch(e){}
 }
 
-function updateIdleTimer(){
+function updateGenTimer(){
   try{
-    var el = document.getElementById('idle-val');
-    if(!lastIdleSince){
+    var el = document.getElementById('gen-val');
+    if(!lastGeneratingSince){
       el.textContent = '\u2014';
       el.style.color = 'var(--dim)';
       return;
     }
-    var diff = Math.floor((Date.now() - new Date(lastIdleSince).getTime()) / 1000);
-    if(diff < 2 || !isFinite(diff) || diff < 0){
+    var diff = Math.floor((Date.now() - new Date(lastGeneratingSince).getTime()) / 1000);
+    if(!isFinite(diff) || diff < 0){
       el.textContent = '\u2014';
       el.style.color = 'var(--dim)';
       return;
     }
     var m = Math.floor(diff / 60), s = diff % 60;
-    if(m >= 60){
-      var h = Math.floor(m / 60);
-      el.textContent = h + 'h ' + String(m % 60).padStart(2, '0') + 'm';
-      el.style.color = 'var(--red)';
-    }else if(m >= 5){
-      el.textContent = m + 'm ' + String(s).padStart(2, '0') + 's';
-      el.style.color = 'var(--yellow)';
+    el.textContent = m + 'm ' + String(s).padStart(2, '0') + 's';
+    el.style.color = diff >= 120 ? 'var(--yellow)' : 'var(--cyan)';
+  }catch(e){}
+}
+
+function updateChannelsFreshness(){
+  try{
+    var section = document.getElementById('channels-section');
+    if(!section) return;
+    var age = Date.now() - lastChannelsUpdateTime;
+    if(lastChannelsUpdateTime === 0){
+      // Never received data yet
+      section.className = '';
+    }else if(age > 30000){
+      section.className = 'stale-danger';
+    }else if(age > 10000){
+      section.className = 'stale-warn';
     }else{
-      el.textContent = m + 'm ' + String(s).padStart(2, '0') + 's';
-      el.style.color = 'var(--dim)';
+      section.className = '';
+    }
+
+    // Re-render "Latest" column client-side so times tick up between polls
+    if(!lastChannelsData.length) return;
+    var cells = section.querySelectorAll('.ch-time');
+    for(var i = 0; i < cells.length && i < lastChannelsData.length; i++){
+      cells[i].textContent = fmtAgo(lastChannelsData[i].latest_message);
     }
   }catch(e){}
 }
@@ -1101,14 +1131,17 @@ function poll(){
       if(!isFinite(ver)) ver = 0;
 
       if(ver > 0){
-        lastIdleSince = typeof d.idle_since === 'string' ? d.idle_since : '';
-        updateIdleTimer();
-        renderChannels(Array.isArray(d.channels) ? d.channels : []);
+        lastGeneratingSince = typeof d.generating_since === 'string' ? d.generating_since : '';
+        updateGenTimer();
+        var chArr = Array.isArray(d.channels) ? d.channels : [];
+        lastChannelsData = chArr;
+        lastChannelsUpdateTime = Date.now();
+        renderChannels(chArr);
 
         var isNew = (ver !== lastVersion);
         if(isNew){
           lastVersion  = ver;
-          lastTimestamp = typeof d.timestamp === 'string' ? d.timestamp : '';
+          lastDataCollectedAt = typeof d.data_collected_at === 'string' ? d.data_collected_at : '';
           lastData     = d;
           everHadData  = true;
           renderThreat(d);
@@ -1156,7 +1189,8 @@ try{
     try{
       if(document.visibilityState === 'visible'){
         updateTimer();
-        updateIdleTimer();
+        updateGenTimer();
+        updateChannelsFreshness();
         if(lastData) updateSoundState(lastData);
         if(pollTimer !== null){ clearTimeout(pollTimer); pollTimer = null; }
         schedulePoll(200);
@@ -1172,7 +1206,8 @@ try{
     try{
       if(e.persisted){
         updateTimer();
-        updateIdleTimer();
+        updateGenTimer();
+        updateChannelsFreshness();
         if(lastData) updateSoundState(lastData);
         if(pollTimer !== null){ clearTimeout(pollTimer); pollTimer = null; }
         schedulePoll(200);
@@ -1192,10 +1227,12 @@ function startPolling(){
     if(timerHandle) clearInterval(timerHandle);
     timerHandle = setInterval(function(){
       updateTimer();
-      updateIdleTimer();
+      updateGenTimer();
+      updateChannelsFreshness();
     }, 1000);
     updateTimer();
-    updateIdleTimer();
+    updateGenTimer();
+    updateChannelsFreshness();
     poll();
   }catch(e){
     console.error('[STARTUP] startPolling error:', e);

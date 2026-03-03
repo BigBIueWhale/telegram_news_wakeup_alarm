@@ -103,9 +103,6 @@ pub async fn run_loop(
     let mut iteration_times: VecDeque<Instant> = VecDeque::with_capacity(FREQUENCY_WINDOW + 1);
     // Track how many messages we last processed so we only re-query when new ones arrive.
     let mut last_processed_total: usize = 0;
-    // Track when the LLM became idle (no new messages to process).
-    // None = currently working, Some = wall-clock ISO-8601 of when idle started.
-    let mut idle_since_wall: Option<String> = None;
 
     loop {
         if shutdown.is_cancelled() {
@@ -117,6 +114,7 @@ pub async fn run_loop(
         log::info!("[processor] Snapshotting channel buffers...");
         let step_start = Instant::now();
         let snapshot = buffers.snapshot();
+        let snapshot_time = Utc::now().to_rfc3339();
         let total_msgs: usize = snapshot.iter().map(|s| s.messages.len()).sum();
         log::info!(
             "[processor] Snapshot complete ({}) — {} channels, {} messages",
@@ -145,11 +143,6 @@ pub async fn run_loop(
 
         // Wait if no messages have arrived yet.
         if snapshot.is_empty() {
-            if idle_since_wall.is_none() {
-                let now = Utc::now().to_rfc3339();
-                idle_since_wall = Some(now.clone());
-                web_state.write().expect("web state lock poisoned").idle_since = now;
-            }
             log::info!("[processor] No messages yet — waiting 5s...");
             tokio::select! {
                 _ = tokio::time::sleep(Duration::from_secs(5)) => {}
@@ -162,11 +155,6 @@ pub async fn run_loop(
         }
 
         if total_msgs < MIN_MESSAGES_TO_PROCESS {
-            if idle_since_wall.is_none() {
-                let now = Utc::now().to_rfc3339();
-                idle_since_wall = Some(now.clone());
-                web_state.write().expect("web state lock poisoned").idle_since = now;
-            }
             log::info!(
                 "[processor] Only {} messages (need {}) — waiting 5s...",
                 total_msgs, MIN_MESSAGES_TO_PROCESS
@@ -183,11 +171,6 @@ pub async fn run_loop(
 
         // Wait for NEW messages before re-querying the LLM with the same data.
         if total_msgs <= last_processed_total {
-            if idle_since_wall.is_none() {
-                let now = Utc::now().to_rfc3339();
-                idle_since_wall = Some(now.clone());
-                web_state.write().expect("web state lock poisoned").idle_since = now;
-            }
             log::info!(
                 "[processor] No new messages since last query ({} total) — waiting 5s...",
                 total_msgs
@@ -221,11 +204,8 @@ pub async fn run_loop(
             );
         }
 
-        // Mark LLM as active (no longer idle).
-        if idle_since_wall.is_some() {
-            idle_since_wall = None;
-            web_state.write().expect("web state lock poisoned").idle_since = String::new();
-        }
+        // Mark LLM as generating.
+        web_state.write().expect("web state lock poisoned").generating_since = Utc::now().to_rfc3339();
 
         // Step 2: Build token-budgeted prompt
         log::info!(
@@ -272,13 +252,14 @@ pub async fn run_loop(
                         // Step 4: Parse and display output
                         log::info!("[processor] Parsing LLM response...");
                         let step_start = Instant::now();
-                        process_and_print_output(&response, &web_state);
+                        process_and_print_output(&response, &web_state, &snapshot_time);
                         log::info!(
                             "[processor] Output processed ({})",
                             format_duration(step_start.elapsed())
                         );
                     }
                     Some(Err(e)) => {
+                        web_state.write().expect("web state lock poisoned").generating_since = String::new();
                         log::info!(
                             "[processor] LLM query failed after {}",
                             format_duration(step_start.elapsed())
@@ -302,6 +283,7 @@ pub async fn run_loop(
                 }
             }
             Err(e) => {
+                web_state.write().expect("web state lock poisoned").generating_since = String::new();
                 log::error!("[processor] Failed to build prompt ({}): {:#}", format_duration(step_start.elapsed()), e);
                 tokio::select! {
                     _ = tokio::time::sleep(Duration::from_secs(10)) => {}
@@ -673,7 +655,7 @@ fn importance_color(importance: &str) -> &'static str {
 
 /// Parse the LLM response as JSON, print a human-readable summary to stdout,
 /// and update the shared web state for the dashboard.
-fn process_and_print_output(raw_response: &str, web_state: &SharedWebState) {
+fn process_and_print_output(raw_response: &str, web_state: &SharedWebState, data_collected_at: &str) {
     let cleaned = strip_think_blocks(raw_response);
     let json_str = extract_json(&cleaned);
 
@@ -742,7 +724,8 @@ fn process_and_print_output(raw_response: &str, web_state: &SharedWebState) {
             {
                 let mut ws = web_state.write().expect("web state lock poisoned");
                 ws.version += 1;
-                ws.timestamp = Utc::now().to_rfc3339();
+                ws.data_collected_at = data_collected_at.to_string();
+                ws.generating_since = String::new();
                 ws.israel_attack_warning = output.israel_attack_warning.clone();
                 ws.israel_actual_red_alerts = output.israel_actual_red_alerts.clone();
                 ws.attack_involves_missiles_not_just_uavs = output.attack_involves_missiles_not_just_uavs.clone();
@@ -762,6 +745,8 @@ fn process_and_print_output(raw_response: &str, web_state: &SharedWebState) {
             }
         }
         Err(e) => {
+            // Clear generating state even on parse failure.
+            web_state.write().expect("web state lock poisoned").generating_since = String::new();
             log::warn!(
                 "LLM response was not valid JSON ({}) — printing raw. \
                  First 500 chars of cleaned output: '{}'",

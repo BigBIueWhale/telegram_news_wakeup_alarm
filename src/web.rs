@@ -15,8 +15,9 @@ use tower_http::services::ServeDir;
 pub struct WebUpdate {
     /// Monotonically increasing version — clients use this to detect changes.
     pub version: u64,
-    /// ISO-8601 timestamp of last LLM update.
-    pub timestamp: String,
+    /// ISO-8601 timestamp of when the displayed data was collected (snapshot time,
+    /// before LLM generation). Tells the user how stale the displayed info is.
+    pub data_collected_at: String,
     /// Threat assessment fields.
     /// Non-empty string = active threat (5-word reason why). Empty string = no threat.
     // Israel-wide (informational)
@@ -29,9 +30,9 @@ pub struct WebUpdate {
     pub center_dan_or_yehuda_or_jerusalem_danger: String,
     pub confirmed_center_attack_not_just_north_south: String,
     pub any_threat: bool,
-    /// ISO-8601 timestamp of when the LLM became idle (waiting for new messages).
-    /// Empty string means the LLM is currently processing.
-    pub idle_since: String,
+    /// ISO-8601 timestamp of when the LLM started generating the current response.
+    /// Empty string means the LLM is idle (not generating).
+    pub generating_since: String,
     /// News items from the last LLM response.
     pub news: Vec<WebNewsItem>,
     /// Active channel buffer info (updated every snapshot, not just on LLM response).
