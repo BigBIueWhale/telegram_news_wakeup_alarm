@@ -1,0 +1,6 @@
+/target
+*.session
+.env
+SECRETS_README.md
+tokenizer.json
+Cargo.lock
