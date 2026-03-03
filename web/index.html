@@ -155,6 +155,15 @@ html,body{height:100%;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Ro
 (function(){
 "use strict";
 
+// Polyfill: String.prototype.padStart (ES2017) — needed for old smart TV browsers.
+if(!String.prototype.padStart){
+  String.prototype.padStart = function(len, fill){
+    var s = String(this); fill = fill || ' ';
+    while(s.length < len) s = fill + s;
+    return s;
+  };
+}
+
 // ================================================================
 //  CONFIGURATION
 // ================================================================
@@ -224,11 +233,11 @@ function initAlarmElement(){
     alarmEl.preload = 'auto';
     alarmEl.addEventListener('canplaythrough', function(){
       alarmReady = true;
-    }, {once:true});
+    });
     alarmEl.addEventListener('error', function(){
       console.warn('alarm.wav failed to load — will use generated fallback');
       alarmReady = false;
-    }, {once:true});
+    });
   }
 
   if(alarmBlobUrl){
@@ -240,35 +249,51 @@ function initAlarmElement(){
   }
 }
 
-// Eagerly fetch the entire alarm.wav into a blob at page load.
+// Eagerly download the entire alarm.wav into a blob at page load.
 // This ensures the file is fully in memory before an emergency.
-fetch('/alarm.wav').then(function(r){
-  if(!r.ok) throw new Error('HTTP ' + r.status);
-  return r.blob();
-}).then(function(blob){
-  alarmBlobUrl = URL.createObjectURL(blob);
-  console.log('alarm.wav pre-cached into memory (' + blob.size + ' bytes)');
-  // If the Audio element was already created from the network URL,
-  // replace it with the blob version so it works offline.
-  if(alarmEl){
-    var wasReady = alarmReady;
-    alarmEl = null;
-    alarmReady = false;
-    initAlarmElement();
-    if(wasReady) alarmReady = true;
-  }
-}).catch(function(e){
-  console.warn('alarm.wav pre-cache failed — will load on demand or use fallback:', e);
-});
+// Uses XHR (not fetch) for smart TV browser compatibility.
+try{
+  var _alarmXhr = new XMLHttpRequest();
+  _alarmXhr.open('GET', '/alarm.wav', true);
+  _alarmXhr.responseType = 'blob';
+  _alarmXhr.onload = function(){
+    if(_alarmXhr.status >= 200 && _alarmXhr.status < 300 && _alarmXhr.response){
+      try{
+        alarmBlobUrl = URL.createObjectURL(_alarmXhr.response);
+        console.log('alarm.wav pre-cached into memory (' + _alarmXhr.response.size + ' bytes)');
+        // If the Audio element was already created from the network URL,
+        // replace it with the blob version so it works offline.
+        if(alarmEl){
+          var wasReady = alarmReady;
+          alarmEl = null;
+          alarmReady = false;
+          initAlarmElement();
+          if(wasReady) alarmReady = true;
+        }
+      }catch(e){
+        console.warn('alarm.wav blob URL creation failed (old browser?) — will use direct URL:', e);
+      }
+    }
+  };
+  _alarmXhr.onerror = function(){
+    console.warn('alarm.wav pre-cache failed — will load on demand or use fallback');
+  };
+  _alarmXhr.send();
+}catch(e){
+  console.warn('alarm.wav XHR pre-cache not supported — will load on demand or use fallback');
+}
 
 function startAlarm(){
   if(alarmReady && alarmEl){
     alarmEl.volume = 1.0;
     alarmEl.currentTime = 0;
-    alarmEl.play().catch(function(e){
-      console.warn('alarm.wav play failed, using fallback:', e);
-      startAlarmFallback();
-    });
+    var p = alarmEl.play();
+    if(p && typeof p.catch === 'function'){
+      p.catch(function(e){
+        console.warn('alarm.wav play failed, using fallback:', e);
+        startAlarmFallback();
+      });
+    }
   }else{
     startAlarmFallback();
   }
@@ -360,7 +385,8 @@ function ensureAudioCtx(){
     catch(e){ return; }
   }
   if(audioCtx.state === 'suspended'){
-    audioCtx.resume().catch(function(){});
+    var p = audioCtx.resume();
+    if(p && typeof p.catch === 'function') p.catch(function(){});
   }
 }
 
@@ -416,11 +442,17 @@ window.unlock = function(){
   initAlarmElement();
   if(alarmEl){
     alarmEl.volume = 0;
-    alarmEl.play().then(function(){
-      alarmEl.pause();
-      alarmEl.currentTime = 0;
-      alarmEl.volume = 1.0;
-    }).catch(function(){});
+    var p = alarmEl.play();
+    if(p && typeof p.then === 'function'){
+      p.then(function(){
+        alarmEl.pause();
+        alarmEl.currentTime = 0;
+        alarmEl.volume = 1.0;
+      }).catch(function(){});
+    }else{
+      // Old browser: play() is synchronous, no promise returned
+      try{ alarmEl.pause(); alarmEl.currentTime = 0; alarmEl.volume = 1.0; }catch(e){}
+    }
   }
 
   // Pre-build tick buffer
@@ -763,88 +795,18 @@ function schedulePoll(delayMs){
   pollTimer = setTimeout(poll, delayMs);
 }
 
-async function poll(){
+// Uses XMLHttpRequest (not fetch/async/await/AbortController) for
+// maximum browser compatibility — works on old smart TV browsers.
+function poll(){
   if(pollInFlight){ schedulePoll(500); return; }
   pollInFlight = true;
 
-  try{
-    var ctrl = new AbortController();
-    var tid = setTimeout(function(){ ctrl.abort(); }, FETCH_TIMEOUT);
+  function finish(){
+    pollInFlight = false;
+    schedulePoll(soundState === 'alarm' ? POLL_THREAT : POLL_NORMAL);
+  }
 
-    var resp = await fetch('/api/status', {
-      signal:  ctrl.signal,
-      cache:   'no-store',
-      headers: {'Accept':'application/json'}
-    });
-    clearTimeout(tid);
-
-    if(!resp.ok) throw new Error('HTTP ' + resp.status);
-    var d = await resp.json();
-
-    // ── VALIDATE PAYLOAD ──
-    var vErrs = validatePayload(d);
-    if(vErrs.length > 0){
-      for(var vi=0; vi<vErrs.length; vi++){
-        console.error('[VALIDATION] ' + vErrs[vi]);
-      }
-      showValidationErrors(vErrs);
-    }else{
-      showValidationErrors([]);
-    }
-
-    // If payload is not even an object, skip everything
-    if(d === null || typeof d !== 'object' || Array.isArray(d)){
-      throw new Error('payload is not a JSON object');
-    }
-
-    // ── SUCCESS ──
-    var wasDown = consecutiveFails > 0;
-    consecutiveFails = 0;
-
-    // Coerce version to number for safety (in case server sends string)
-    var ver = typeof d.version === 'number' ? d.version : Number(d.version);
-    if(!isFinite(ver)) ver = 0;
-
-    if(ver > 0){
-      // Always update idle_since and channels on every poll (they change independently of version).
-      lastIdleSince = typeof d.idle_since === 'string' ? d.idle_since : '';
-      updateIdleTimer();
-      renderChannels(Array.isArray(d.channels) ? d.channels : []);
-
-      var isNew = (ver !== lastVersion);
-      if(isNew){
-        lastVersion  = ver;
-        lastTimestamp = typeof d.timestamp === 'string' ? d.timestamp : '';
-        lastData     = d;
-        everHadData  = true;
-        renderThreat(d);
-        renderNews(Array.isArray(d.news) ? d.news : []);
-      }
-      setConnStatus('ok','');
-
-      // Drive sound from current state on EVERY successful poll,
-      // not just on version changes. This ensures sound tracks
-      // truth even if the version didn't change but we need to
-      // re-assert state (e.g. after tab foreground or reconnect).
-      updateSoundState(d);
-
-    }else{
-      if(everHadData){
-        setConnStatus('restarted','Server restarted \u2014 waiting for next LLM update\u2026');
-      }else{
-        showLoading('Waiting for first LLM update\u2026');
-        setConnStatus('ok','');
-      }
-      lastVersion = -1;
-      // Don't touch sound — keep whatever was playing from last known state.
-    }
-
-    if(wasDown && lastData){
-      renderThreat(lastData);
-      renderNews(Array.isArray(lastData.news) ? lastData.news : []);
-    }
-
-  }catch(e){
+  function handleError(){
     consecutiveFails++;
     if(consecutiveFails === 1){
       setConnStatus('warn','Reconnecting\u2026');
@@ -853,11 +815,94 @@ async function poll(){
     }
     // Sound continues based on last known state. Intentional:
     // if WiFi drops during an attack, alarm must NOT stop.
-  }finally{
-    pollInFlight = false;
+    finish();
   }
 
-  schedulePoll(soundState === 'alarm' ? POLL_THREAT : POLL_NORMAL);
+  var xhr = new XMLHttpRequest();
+  // Cache-bust query param — most reliable way to prevent stale responses on old browsers.
+  xhr.open('GET', '/api/status?_=' + Date.now(), true);
+  xhr.timeout = FETCH_TIMEOUT;
+  try{ xhr.setRequestHeader('Accept', 'application/json'); }catch(e){}
+
+  xhr.onload = function(){
+    try{
+      if(xhr.status < 200 || xhr.status >= 300) throw new Error('HTTP ' + xhr.status);
+      var d = JSON.parse(xhr.responseText);
+
+      // ── VALIDATE PAYLOAD ──
+      var vErrs = validatePayload(d);
+      if(vErrs.length > 0){
+        for(var vi=0; vi<vErrs.length; vi++){
+          console.error('[VALIDATION] ' + vErrs[vi]);
+        }
+        showValidationErrors(vErrs);
+      }else{
+        showValidationErrors([]);
+      }
+
+      // If payload is not even an object, skip everything
+      if(d === null || typeof d !== 'object' || Array.isArray(d)){
+        throw new Error('payload is not a JSON object');
+      }
+
+      // ── SUCCESS ──
+      var wasDown = consecutiveFails > 0;
+      consecutiveFails = 0;
+
+      // Coerce version to number for safety (in case server sends string)
+      var ver = typeof d.version === 'number' ? d.version : Number(d.version);
+      if(!isFinite(ver)) ver = 0;
+
+      if(ver > 0){
+        // Always update idle_since and channels on every poll (they change independently of version).
+        lastIdleSince = typeof d.idle_since === 'string' ? d.idle_since : '';
+        updateIdleTimer();
+        renderChannels(Array.isArray(d.channels) ? d.channels : []);
+
+        var isNew = (ver !== lastVersion);
+        if(isNew){
+          lastVersion  = ver;
+          lastTimestamp = typeof d.timestamp === 'string' ? d.timestamp : '';
+          lastData     = d;
+          everHadData  = true;
+          renderThreat(d);
+          renderNews(Array.isArray(d.news) ? d.news : []);
+        }
+        setConnStatus('ok','');
+
+        // Drive sound from current state on EVERY successful poll,
+        // not just on version changes. This ensures sound tracks
+        // truth even if the version didn't change but we need to
+        // re-assert state (e.g. after tab foreground or reconnect).
+        updateSoundState(d);
+
+      }else{
+        if(everHadData){
+          setConnStatus('restarted','Server restarted \u2014 waiting for next LLM update\u2026');
+        }else{
+          showLoading('Waiting for first LLM update\u2026');
+          setConnStatus('ok','');
+        }
+        lastVersion = -1;
+        // Don't touch sound — keep whatever was playing from last known state.
+      }
+
+      if(wasDown && lastData){
+        renderThreat(lastData);
+        renderNews(Array.isArray(lastData.news) ? lastData.news : []);
+      }
+
+    }catch(e){
+      handleError();
+      return;
+    }
+    finish();
+  };
+
+  xhr.onerror = handleError;
+  xhr.ontimeout = handleError;
+
+  try{ xhr.send(); }catch(e){ handleError(); }
 }
 
 // ================================================================
