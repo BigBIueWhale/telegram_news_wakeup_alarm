@@ -73,7 +73,6 @@ async fn main() -> Result<()> {
     // On connection/protocol errors, we wait and retry with exponential backoff.
     // The telegram_ready Notify is passed every time — it's harmless to signal it
     // more than once (subsequent notify_one() calls are no-ops after the first wake).
-    let mut backoff = Duration::from_secs(5);
     loop {
         log::info!("Connecting to Telegram (session: '{}')...", config.session_path);
         match telegram::run_listener(&config, &buffers, Some(Arc::clone(&telegram_ready))).await {
@@ -92,14 +91,16 @@ async fn main() -> Result<()> {
                 }
 
                 // Transient errors (network, timeout, server hiccup) get retried.
+                // Always reconnect after 5s — if we got this far, auth succeeded
+                // and updates were streaming. The error is a network blip, not
+                // a cascading failure that needs exponential backoff.
+                let reconnect_delay = Duration::from_secs(5);
                 log::error!(
                     "Telegram listener error (transient): {:#}\nReconnecting in {:?}...",
                     e,
-                    backoff
+                    reconnect_delay
                 );
-                tokio::time::sleep(backoff).await;
-                // Exponential backoff: 5s, 10s, 20s, 40s, 60s (capped).
-                backoff = (backoff * 2).min(Duration::from_secs(60));
+                tokio::time::sleep(reconnect_delay).await;
             }
         }
     }

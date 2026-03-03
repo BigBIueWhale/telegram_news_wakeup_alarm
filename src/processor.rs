@@ -73,6 +73,8 @@ pub async fn run_loop(
     let mut consecutive_errors: u32 = 0;
     // Track timestamps of productive iterations for rolling average interval.
     let mut iteration_times: VecDeque<Instant> = VecDeque::with_capacity(FREQUENCY_WINDOW + 1);
+    // Track how many messages we last processed so we only re-query when new ones arrive.
+    let mut last_processed_total: usize = 0;
 
     loop {
         if shutdown.is_cancelled() {
@@ -84,10 +86,12 @@ pub async fn run_loop(
         log::info!("[processor] Snapshotting channel buffers...");
         let step_start = Instant::now();
         let snapshot = buffers.snapshot();
+        let total_msgs: usize = snapshot.iter().map(|s| s.messages.len()).sum();
         log::info!(
-            "[processor] Snapshot complete ({}) — {} channels",
+            "[processor] Snapshot complete ({}) — {} channels, {} messages",
             format_duration(step_start.elapsed()),
-            snapshot.len()
+            snapshot.len(),
+            total_msgs
         );
 
         // Wait if no messages have arrived yet.
@@ -103,11 +107,26 @@ pub async fn run_loop(
             continue;
         }
 
-        let total_msgs: usize = snapshot.iter().map(|s| s.messages.len()).sum();
         if total_msgs < MIN_MESSAGES_TO_PROCESS {
             log::info!(
                 "[processor] Only {} messages (need {}) — waiting 5s...",
                 total_msgs, MIN_MESSAGES_TO_PROCESS
+            );
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_secs(5)) => {}
+                _ = shutdown.cancelled() => {
+                    log::info!("[processor] Shutdown signal received — exiting");
+                    return Ok(());
+                }
+            }
+            continue;
+        }
+
+        // Wait for NEW messages before re-querying the LLM with the same data.
+        if total_msgs <= last_processed_total {
+            log::info!(
+                "[processor] No new messages since last query ({} total) — waiting 5s...",
+                total_msgs
             );
             tokio::select! {
                 _ = tokio::time::sleep(Duration::from_secs(5)) => {}
@@ -178,6 +197,7 @@ pub async fn run_loop(
                             format_duration(step_start.elapsed())
                         );
                         consecutive_errors = 0;
+                        last_processed_total = total_msgs;
 
                         // Step 4: Parse and display output
                         log::info!("[processor] Parsing LLM response...");

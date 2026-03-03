@@ -117,13 +117,15 @@ pub async fn run_listener(config: &Config, buffers: &ChannelBuffers, ready: Opti
     }
 
     // 5. Start the update stream.
-    //    catch_up: false — we don't process updates missed while offline.
+    //    catch_up: true — recover updates missed during network outages by loading
+    //    saved pts/qts from the session file and calling getChannelDifference.
+    //    Without this, a 2-minute network drop loses all messages permanently.
     //    update_queue_limit: 1000 — generous buffer (default is 100, too small for busy accounts).
     let mut stream = client
         .stream_updates(
             updates,
             UpdatesConfiguration {
-                catch_up: false,
+                catch_up: true,
                 update_queue_limit: Some(1000),
             },
         )
@@ -136,9 +138,16 @@ pub async fn run_listener(config: &Config, buffers: &ChannelBuffers, ready: Opti
 
     // 6. Main update loop with:
     //    - Ctrl+C handling for graceful shutdown
-    //    - Periodic state saves (every 60s) to limit re-processing on crash
-    //    - 5-minute timeout on updates.next() to detect hung connections
-    //      (see grammers issues #388 and #8 — UpdateStream can hang permanently)
+    //    - Periodic state saves (every 60s) to persist pts/qts for gap recovery.
+    //      Critical: without this, a crash loses all update state and catch_up
+    //      has nothing to resume from.
+    //    - 5-minute timeout on updates.next() to detect hung connections.
+    //      grammers has no TCP keepalive; the MTProto PingDelayDisconnect (75s)
+    //      handles server-side detection, but if the client's read() blocks
+    //      forever (issue #388), this timeout is the safety net.
+    //      For a 2-2.5 minute network outage: the server closes after 75s,
+    //      network recovers, client gets RST → error → reconnect. The 5-minute
+    //      timeout only fires if something goes truly wrong (permanent hang).
     let mut save_interval = tokio::time::interval(Duration::from_secs(60));
     save_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
