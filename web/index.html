@@ -165,7 +165,24 @@ html,body{height:100%;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Ro
   <h1>News Alarm</h1>
   <p>This dashboard monitors Telegram news channels for threat alerts. Tap below to enable sound alerts.</p>
   <button onclick="unlock()">Enable Alerts &amp; Enter</button>
-  <div style="margin-top:2rem;display:flex;gap:12px;justify-content:center;flex-wrap:wrap">
+  <label id="tick-toggle" style="margin-top:2.2rem;display:flex;align-items:center;gap:.75rem;
+    cursor:pointer;user-select:none;-webkit-user-select:none;padding:.6rem 1.4rem;
+    border-radius:10px;background:rgba(255,255,255,.06);border:1px solid var(--border);
+    transition:background .2s" onclick="toggleTick()">
+    <span id="tick-check" style="display:inline-flex;align-items:center;justify-content:center;
+      width:26px;height:26px;border-radius:7px;border:2px solid var(--yellow);
+      background:var(--yellow);transition:all .2s;flex-shrink:0">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" style="transition:opacity .15s">
+        <path d="M3.5 8.5L6.5 11.5L12.5 4.5" stroke="#000" stroke-width="2.2"
+          stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </span>
+    <span style="font-size:.95rem;color:var(--text);font-weight:500;line-height:1.3">
+      Enable tick sounds<br>
+      <span style="font-size:.78rem;color:var(--dim);font-weight:400">Minor threats &mdash; soft click every second</span>
+    </span>
+  </label>
+  <div style="margin-top:1.4rem;display:flex;gap:12px;justify-content:center;flex-wrap:wrap">
     <button id="btn-test-alarm" onclick="testSound('alarm')" style="font-size:.9rem;padding:.5rem 1.2rem;border:3px solid transparent;border-radius:8px;
       background:var(--red);color:#fff;cursor:pointer;font-weight:600;transition:all .15s">Test Alarm</button>
     <button id="btn-test-tick" onclick="testSound('tick')" style="font-size:.9rem;padding:.5rem 1.2rem;border:3px solid transparent;border-radius:8px;
@@ -443,6 +460,7 @@ var lastChannelsUpdateTime = 0;
 // ================================================================
 
 var soundState      = 'silent';  // 'silent' | 'tick' | 'alarm'
+var tickEnabled     = true;      // user preference: play tick sounds for minor threats
 
 // ================================================================
 //  AUDIO ENGINE — <audio> ELEMENTS ONLY
@@ -664,7 +682,7 @@ function updateSoundState(data){
     });
     if(shouldAlarm){
       target = 'alarm';
-    }else if(data.any_threat === true){
+    }else if(data.any_threat === true && tickEnabled){
       target = 'tick';
     }else{
       target = 'silent';
@@ -700,13 +718,31 @@ function updateSoundState(data){
 // ================================================================
 
 window.unlock = function(){
-  console.log('[UNLOCK] User tapped Enable Alerts');
+  console.log('[UNLOCK] User tapped Enable Alerts (tick=' + tickEnabled + ')');
   audioUnlocked = true;
   try{
     document.getElementById('welcome').classList.add('hidden');
   }catch(e){}
-  console.log('[UNLOCK] Audio unlocked');
   if(lastData) updateSoundState(lastData);
+};
+
+window.toggleTick = function(){
+  tickEnabled = !tickEnabled;
+  console.log('[TICK] Toggle: ' + (tickEnabled ? 'ON' : 'OFF'));
+  var box = document.getElementById('tick-check');
+  if(box){
+    box.style.background = tickEnabled ? 'var(--yellow)' : 'transparent';
+    box.querySelector('svg').style.opacity = tickEnabled ? '1' : '0';
+  }
+  // If tick is currently playing and user disabled it, stop immediately
+  if(!tickEnabled && soundState === 'tick'){
+    stopTick();
+    soundState = 'silent';
+  }
+  // If tick was suppressed and user re-enabled, re-evaluate
+  if(tickEnabled && audioUnlocked && !testMode && lastData){
+    updateSoundState(lastData);
+  }
 };
 
 // ================================================================
