@@ -19,7 +19,7 @@ struct ChatMessage {
     content: String,
 }
 
-/// Model parameters matching the qwen3.5-custom Modelfile.
+/// Model parameters matching the Qwen 3.5 "Non-Thinking — General" profile.
 /// All fields are explicit — no implicit defaults from Ollama.
 #[derive(Serialize)]
 struct ChatOptions {
@@ -147,13 +147,13 @@ impl OllamaClient {
                 content: prompt.to_string(),
             }],
             stream: true,
-            think: true,
+            think: false,
             options: ChatOptions {
                 num_ctx: 131072,
-                num_predict: 81920,
-                temperature: 1.0,
+                num_predict: 32768,
+                temperature: 0.7,
                 top_k: 20,
-                top_p: 0.95,
+                top_p: 0.8,
                 presence_penalty: 1.5,
                 repeat_penalty: 1.0,
             },

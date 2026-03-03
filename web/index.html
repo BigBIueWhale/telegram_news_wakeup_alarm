@@ -423,21 +423,20 @@ var lastChannelsUpdateTime = 0;
 //  Three mutually-exclusive sound states:
 //
 //    'alarm'  — ANY of the four Jerusalem/center fields is
-//               non-empty. Loops alarm.wav (via Web Audio
-//               AudioBufferSourceNode) at max volume. If
-//               decoding failed, falls back to generated siren.
+//               non-empty. Repeats alarm.mp3 at max volume
+//               with ALARM_GAP_MS silence between bursts.
 //
 //    'tick'   — any OTHER threat boolean is TRUE. Soft periodic
-//               click every 1s. "Something is happening."
+//               click every TICK_PERIOD_MS. "Something is happening."
 //
 //    'silent' — all booleans FALSE. No sound.
 //
-//  CRITICAL DESIGN: alarm.wav is downloaded as an ArrayBuffer and
-//  decoded via audioCtx.decodeAudioData() into an AudioBuffer.
-//  It is then played via AudioBufferSourceNode with loop=true.
-//  This uses PURE Web Audio API — no <audio> elements, no blob
-//  URLs, no media element autoplay quirks. This is the same API
-//  path as the tick sound, which is proven to work on smart TVs.
+//  Uses <audio> elements only (no Web Audio API — Hisense TVs
+//  produce zero audible output from AudioContext despite reporting
+//  state=running). Each sound creates a fresh Audio() element
+//  (TV can't reliably reuse elements). Timing is driven by
+//  onended callbacks, NOT setInterval, to prevent overlaps and
+//  ensure uniform pacing. Old elements are explicitly released.
 //
 //  On connection loss, sound continues. If we lose WiFi during
 //  an attack, the alarm must NOT stop.
@@ -454,6 +453,12 @@ var soundState      = 'silent';  // 'silent' | 'tick' | 'alarm'
 //  reporting state=running. <audio> elements are the only reliable
 //  cross-device path (phones, desktops, and smart TVs).
 //
+//  TIMING: Uses onended-driven setTimeout chains, NOT setInterval.
+//  setInterval fires at wall-clock intervals regardless of whether
+//  the previous Audio element finished, causing drift, bunching,
+//  and overlaps. The onended approach guarantees: exactly one sound
+//  plays at a time, uniform pacing, and proper element cleanup.
+//
 //  Audio files:
 //
 //  alarm.mp3 — Generated from alarm.wav (boosted +19dB, resampled to 44100Hz):
@@ -469,14 +474,32 @@ var soundState      = 'silent';  // 'silent' | 'tick' | 'alarm'
 // ================================================================
 
 // Alarm state
-var alarmTimer      = null;      // setInterval handle for repeating alarm
-var alarmRetryTimer = null;      // retry interval when play() is rejected
+var alarmActive    = false;      // master flag: should alarm be sounding?
+var alarmEl        = null;       // the currently-playing Audio element
+var alarmNextTimer = null;       // setTimeout handle for the next burst
 
 // Tick state
-var tickTimer       = null;      // setInterval handle for 1s tick
+var tickActive     = false;      // master flag: should tick be sounding?
+var tickEl         = null;       // the currently-playing Audio element
+var tickNextTimer  = null;       // setTimeout handle for the next tick
 
-// MediaError code names (for logging)
-var MEDIA_ERR_NAMES = {1:'ABORTED', 2:'NETWORK', 3:'DECODE', 4:'SRC_NOT_SUPPORTED'};
+// Timing constants
+var ALARM_GAP_MS   = 200;       // silence between alarm bursts
+var ALARM_MAX_MS   = 3000;      // safety timeout if onended never fires
+var TICK_PERIOD_MS = 1000;      // target tick-to-tick interval
+var TICK_MAX_MS    = 3000;      // safety timeout if onended never fires
+
+// ================================================================
+//  SHARED: clean up an Audio element (release resources)
+// ================================================================
+
+function releaseAudio(el){
+  if(!el) return;
+  try{ el.onended = null; }catch(e){}
+  try{ el.onerror = null; }catch(e){}
+  try{ el.pause(); }catch(e){}
+  try{ el.src = ''; }catch(e){}
+}
 
 // ================================================================
 //  PRE-LOAD AUDIO AT PAGE LOAD
@@ -500,63 +523,139 @@ function preloadAudio(){
 // ================================================================
 //  ALARM — start / stop
 //
-//  If play() is rejected (e.g. page loaded during an active alarm
-//  before the user has interacted — Android autoplay policy), we
-//  retry every 500ms until it succeeds or the alarm is stopped.
-//  This handles the "open page during alarm" scenario without any
-//  generated-audio fallback.
+//  Each burst: create fresh Audio, play it, wait for onended,
+//  pause + release old element, wait ALARM_GAP_MS, repeat.
+//  A safety timeout fires if onended doesn't (TV quirk, decode
+//  error, etc). play() rejection retries on the next cycle.
+//  Exactly one Audio element exists at any time.
 // ================================================================
 
-// Play one alarm burst using a fresh Audio element (same pattern as tick).
-// alarm.mp3 is ~0.8s; we repeat every 1s for continuous alarming.
 function playOneAlarm(){
+  alarmNextTimer = null;
+
+  // Clean up previous element before creating a new one
+  releaseAudio(alarmEl);
+  alarmEl = null;
+
+  if(!alarmActive) return;
+
   try{
     var a = new Audio('/alarm.mp3?v=3');
     a.volume = 1.0;
+    alarmEl = a;
+
+    // Guard: only schedule next once per cycle
+    var handled = false;
+    function onDone(){
+      if(handled) return;
+      handled = true;
+      releaseAudio(a);
+      if(a === alarmEl) alarmEl = null;
+      if(alarmActive){
+        alarmNextTimer = setTimeout(playOneAlarm, ALARM_GAP_MS);
+      }
+    }
+
+    a.onended = onDone;
+    a.onerror = onDone;
+
+    // Safety: if onended never fires, force next cycle
+    setTimeout(onDone, ALARM_MAX_MS);
+
     var p = a.play();
     if(p && typeof p.catch === 'function') p.catch(function(e){
       console.warn('[ALARM] play() rejected:', e);
+      // Still cycle — will retry on next iteration
+      onDone();
     });
-  }catch(e){}
+  }catch(e){
+    if(alarmActive){
+      alarmNextTimer = setTimeout(playOneAlarm, 1000);
+    }
+  }
 }
 
 function startAlarm(){
   console.log('[ALARM] startAlarm');
   stopAlarm();
+  alarmActive = true;
   playOneAlarm();
-  alarmTimer = setInterval(playOneAlarm, 1000);
 }
 
 function stopAlarm(){
-  if(alarmTimer){ clearInterval(alarmTimer); alarmTimer = null; }
+  alarmActive = false;
+  if(alarmNextTimer){ clearTimeout(alarmNextTimer); alarmNextTimer = null; }
+  releaseAudio(alarmEl);
+  alarmEl = null;
 }
 
 // ================================================================
 //  TICK — start / stop
 //
-//  Each tick creates a fresh Audio('/tick.mp3?v=2') element. This is
-//  the only approach that works reliably on smart TVs (reusing one
-//  element with currentTime=0 fails on short clips). The file is
-//  3KB and served from browser cache after the initial preload.
+//  Same onended-driven pattern as alarm. tick.mp3 is ~250ms;
+//  after onended we wait (TICK_PERIOD_MS - elapsed) to maintain
+//  a uniform 1s tick-to-tick cadence. If the sound takes longer
+//  than TICK_PERIOD_MS (shouldn't happen), the next tick fires
+//  immediately with no overlap.
 // ================================================================
 
 function playOneTick(){
+  tickNextTimer = null;
+
+  releaseAudio(tickEl);
+  tickEl = null;
+
+  if(!tickActive) return;
+
+  var t0 = Date.now();
+
   try{
     var t = new Audio('/tick.mp3?v=2');
     t.volume = 1.0;
+    tickEl = t;
+
+    var handled = false;
+    function onDone(){
+      if(handled) return;
+      handled = true;
+      releaseAudio(t);
+      if(t === tickEl) tickEl = null;
+      if(tickActive){
+        // Wait remaining time to hit TICK_PERIOD_MS total cycle
+        var elapsed = Date.now() - t0;
+        var gap = TICK_PERIOD_MS - elapsed;
+        if(gap < 50) gap = 50; // minimum gap to avoid bunching
+        tickNextTimer = setTimeout(playOneTick, gap);
+      }
+    }
+
+    t.onended = onDone;
+    t.onerror = onDone;
+
+    setTimeout(onDone, TICK_MAX_MS);
+
     var p = t.play();
-    if(p && typeof p.catch === 'function') p.catch(function(){});
-  }catch(e){}
+    if(p && typeof p.catch === 'function') p.catch(function(){
+      onDone();
+    });
+  }catch(e){
+    if(tickActive){
+      tickNextTimer = setTimeout(playOneTick, 1000);
+    }
+  }
 }
 
 function startTick(){
-  if(tickTimer) return;
+  if(tickActive) return;
+  tickActive = true;
   playOneTick();
-  tickTimer = setInterval(playOneTick, 1000);
 }
 
 function stopTick(){
-  if(tickTimer){ clearInterval(tickTimer); tickTimer = null; }
+  tickActive = false;
+  if(tickNextTimer){ clearTimeout(tickNextTimer); tickNextTimer = null; }
+  releaseAudio(tickEl);
+  tickEl = null;
 }
 
 // ================================================================
