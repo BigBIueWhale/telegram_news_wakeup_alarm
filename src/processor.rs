@@ -80,19 +80,12 @@ pub async fn run_loop(
             return Ok(());
         }
 
-        // Step 1: Snapshot buffers
-        log::info!("[processor] Snapshotting channel buffers...");
-        let step_start = Instant::now();
+        // Step 1: Snapshot buffers (quiet until messages arrive)
         let snapshot = buffers.snapshot();
-        log::info!(
-            "[processor] Snapshot complete ({}) — {} channels",
-            format_duration(step_start.elapsed()),
-            snapshot.len()
-        );
 
         // Wait if no messages have arrived yet.
         if snapshot.is_empty() {
-            log::info!("[processor] No messages yet — waiting 5s...");
+            log::debug!("[processor] No messages yet — waiting 5s...");
             tokio::select! {
                 _ = tokio::time::sleep(Duration::from_secs(5)) => {}
                 _ = shutdown.cancelled() => {
@@ -105,7 +98,7 @@ pub async fn run_loop(
 
         let total_msgs: usize = snapshot.iter().map(|s| s.messages.len()).sum();
         if total_msgs < MIN_MESSAGES_TO_PROCESS {
-            log::info!(
+            log::debug!(
                 "[processor] Only {} messages (need {}) — waiting 5s...",
                 total_msgs, MIN_MESSAGES_TO_PROCESS
             );
@@ -118,6 +111,13 @@ pub async fn run_loop(
             }
             continue;
         }
+
+        // Now we have work to do — log the snapshot step.
+        log::info!(
+            "[processor] Snapshot: {} channels, {} messages",
+            snapshot.len(),
+            total_msgs
+        );
 
         // Track iteration frequency (only for productive iterations).
         let now_instant = Instant::now();
