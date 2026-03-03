@@ -13,6 +13,7 @@ const NEWS_CHANNEL_PATTERNS: &[&str] = &[
     "חדשות 18",
     "חדשות ישראל",
     "אבו עלי",
+    "News IL",
 ];
 
 /// Returns true if the channel title matches any monitored news channel pattern.
