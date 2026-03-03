@@ -1,6 +1,8 @@
 use anyhow::{Context, Result};
+use std::sync::Arc;
 use std::time::Duration;
 use telegram_news_alarm::{buffer::ChannelBuffers, config::Config, ollama::OllamaClient, processor, telegram};
+use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
 #[tokio::main]
@@ -52,21 +54,29 @@ async fn main() -> Result<()> {
     // Shared shutdown signal: cancelled when the Telegram listener exits (Ctrl+C or fatal error).
     let shutdown = CancellationToken::new();
 
-    // Spawn the LLM processing loop as a background task.
-    // It will wait for messages to arrive before its first query.
+    // The processor must NOT start until Telegram authentication is complete,
+    // otherwise its periodic log output interferes with the interactive login prompt.
+    // run_listener signals the Notify after auth + peer cache are done.
+    // The processor task is spawned once and blocks on the Notify before entering its loop.
+    let telegram_ready = Arc::new(Notify::new());
     let processor_buffers = buffers.clone();
     let processor_shutdown = shutdown.clone();
+    let processor_ready = Arc::clone(&telegram_ready);
     let processor_handle = tokio::spawn(async move {
+        processor_ready.notified().await;
+        log::info!("Telegram authenticated — starting LLM processor");
         processor::run_loop(processor_buffers, tokenizer, ollama, processor_shutdown).await
     });
 
     // Run the Telegram listener with automatic reconnection on failure.
     // On Ctrl+C, run_listener returns Ok(()) and we break out to shut down.
     // On connection/protocol errors, we wait and retry with exponential backoff.
+    // The telegram_ready Notify is passed every time — it's harmless to signal it
+    // more than once (subsequent notify_one() calls are no-ops after the first wake).
     let mut backoff = Duration::from_secs(5);
     loop {
         log::info!("Connecting to Telegram (session: '{}')...", config.session_path);
-        match telegram::run_listener(&config, &buffers).await {
+        match telegram::run_listener(&config, &buffers, Some(Arc::clone(&telegram_ready))).await {
             Ok(()) => {
                 // Graceful shutdown (Ctrl+C was pressed inside the listener).
                 log::info!("Telegram listener shut down gracefully");
@@ -77,6 +87,7 @@ async fn main() -> Result<()> {
                 // should NOT be retried — they'll never succeed.
                 if telegram::is_fatal_telegram_error(&e) {
                     log::error!("FATAL Telegram error (will NOT retry): {:#}", e);
+                    processor_handle.abort();
                     return Err(e);
                 }
 

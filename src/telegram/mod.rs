@@ -10,6 +10,7 @@ use grammers_client::{Client, SenderPool};
 use grammers_session::storages::SqliteSession;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::Notify;
 
 /// Errors that should NOT be retried — they indicate a configuration or
 /// credentials problem that no amount of reconnecting will fix.
@@ -43,7 +44,7 @@ pub fn is_fatal_telegram_error(err: &anyhow::Error) -> bool {
 /// This function is designed to be called in a reconnection loop: on error,
 /// the caller waits briefly and calls again. The SQLite session file persists
 /// authentication state across reconnections.
-pub async fn run_listener(config: &Config, buffers: &ChannelBuffers) -> Result<()> {
+pub async fn run_listener(config: &Config, buffers: &ChannelBuffers, ready: Option<Arc<Notify>>) -> Result<()> {
     // 1. Open (or create) the SQLite session file.
     //    This persists: auth keys, peer cache (channel hashes), update state (pts/qts/seq).
     let session = Arc::new(
@@ -107,6 +108,13 @@ pub async fn run_listener(config: &Config, buffers: &ChannelBuffers) -> Result<(
         channel_count,
         group_count
     );
+
+    // Signal that authentication and peer cache are complete.
+    // The caller uses this to know when it's safe to start other tasks
+    // (e.g., the LLM processor) without interfering with interactive login.
+    if let Some(ready) = ready {
+        ready.notify_one();
+    }
 
     // 5. Start the update stream.
     //    catch_up: false — we don't process updates missed while offline.
