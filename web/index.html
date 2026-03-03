@@ -361,9 +361,8 @@ window.unlock = function(){
 
   audioUnlocked = true;
   document.getElementById('welcome').classList.add('hidden');
-  startPolling();
 
-  // If we already have data (e.g. from a pre-unlock fetch), apply sound now
+  // Polling is already running (started on page load). Apply sound to current data.
   if(lastData) updateSoundState(lastData);
 };
 
@@ -772,9 +771,11 @@ function startPolling(){
   poll();
 }
 
-// Pre-create alarm element so the browser starts fetching alarm.wav
-// even before unlock. Playback won't work until unlock() is called.
+// Start fetching data immediately on page load — don't wait for unlock.
+// Data renders behind the welcome overlay so it's instant when dismissed.
+// Audio won't play until unlock() is called (Chrome autoplay policy).
 initAlarmElement();
+startPolling();
 
 })();
 </script>
