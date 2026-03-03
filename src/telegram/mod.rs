@@ -8,6 +8,7 @@ use grammers_client::peer::Peer;
 use grammers_client::update::Update;
 use grammers_client::{Client, SenderPool};
 use grammers_session::storages::SqliteSession;
+use grammers_session::types::PeerRef;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Notify;
@@ -92,13 +93,22 @@ pub async fn run_listener(config: &Config, buffers: &ChannelBuffers, ready: Opti
     let mut dialogs = client.iter_dialogs();
     let mut channel_count: u32 = 0;
     let mut group_count: u32 = 0;
+    let mut channels: Vec<(PeerRef, String, i64)> = Vec::new();
     while let Some(dialog) = dialogs
         .next()
         .await
         .context("failed while iterating dialogs for peer cache — possible network issue")?
     {
         match dialog.peer() {
-            Peer::Channel(_) => channel_count += 1,
+            Peer::Channel(channel) => {
+                channel_count += 1;
+                let channel_id = channel.id().bare_id().unwrap_or(0);
+                channels.push((
+                    dialog.peer_ref(),
+                    channel.title().to_string(),
+                    channel_id,
+                ));
+            }
             Peer::Group(_) => group_count += 1,
             _ => {}
         }
@@ -109,9 +119,61 @@ pub async fn run_listener(config: &Config, buffers: &ChannelBuffers, ready: Opti
         group_count
     );
 
-    // Signal that authentication and peer cache are complete.
-    // The caller uses this to know when it's safe to start other tasks
-    // (e.g., the LLM processor) without interfering with interactive login.
+    // 4b. Load historical messages to pre-fill buffers before the LLM processor starts.
+    //     This ensures the processor has substantial context from its very first run,
+    //     rather than waiting for live messages to trickle in.
+    //     Messages arrive newest-first from iter_messages; we reverse each batch so
+    //     oldest messages enter the ring buffer first (preserving chronological order).
+    log::info!("Loading historical messages (up to 512 per channel)...");
+    let mut total_history_msgs: usize = 0;
+    for (peer_ref, title, channel_id) in &channels {
+        let mut iter = client.iter_messages(*peer_ref).limit(512);
+        let mut batch: Vec<ChannelMessage> = Vec::new();
+        while let Some(msg) = iter
+            .next()
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to fetch history for channel '{}' (id: {}) — possible network issue",
+                    title, channel_id
+                )
+            })?
+        {
+            if msg.outgoing() {
+                continue;
+            }
+            let text = msg.text().to_string();
+            if text.is_empty() {
+                continue;
+            }
+            batch.push(ChannelMessage {
+                id: msg.id(),
+                text,
+                date: msg.date(),
+                channel_title: title.clone(),
+                channel_id: *channel_id,
+            });
+        }
+        // iter_messages returns newest-first; reverse to push oldest-first into the ring buffer.
+        batch.reverse();
+        let count = batch.len();
+        for msg in batch {
+            buffers.push(msg);
+        }
+        if count > 0 {
+            log::info!("  {} — {} messages loaded", title, count);
+        }
+        total_history_msgs += count;
+    }
+    log::info!(
+        "History backfill complete: {} messages across {} channels",
+        total_history_msgs,
+        channels.len()
+    );
+
+    // Signal that authentication, peer cache, and history backfill are complete.
+    // The caller uses this to know when it's safe to start the LLM processor
+    // (which will now have full buffers from its very first run).
     if let Some(ready) = ready {
         ready.notify_one();
     }
