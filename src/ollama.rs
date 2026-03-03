@@ -9,6 +9,7 @@ struct ChatRequest {
     model: String,
     messages: Vec<ChatMessage>,
     stream: bool,
+    think: bool,
     options: ChatOptions,
 }
 
@@ -146,12 +147,13 @@ impl OllamaClient {
                 content: prompt.to_string(),
             }],
             stream: true,
+            think: false,
             options: ChatOptions {
                 num_ctx: 131072,
-                num_predict: 81920,
-                temperature: 1.0,
+                num_predict: 4096,
+                temperature: 0.7,
                 top_k: 20,
-                top_p: 0.95,
+                top_p: 0.8,
                 presence_penalty: 1.5,
                 repeat_penalty: 1.0,
             },

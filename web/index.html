@@ -78,6 +78,12 @@ html,body{height:100%;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Ro
 
 .empty-msg{color:var(--dim);text-align:center;padding:2rem 0;font-size:.9rem}
 
+/* Validation error bar */
+#validation-bar{position:fixed;bottom:0;left:0;right:0;z-index:101;padding:8px 12px;
+  font-size:.75rem;font-weight:600;text-align:center;background:#5c2d00;color:#ffd;
+  max-height:30vh;overflow-y:auto;display:none;border-top:2px solid #f90}
+#validation-bar.visible{display:block}
+
 /* Loading skeleton */
 #loading{text-align:center;padding:3rem 0;color:var(--dim)}
 #loading .spinner{display:inline-block;width:32px;height:32px;border:3px solid var(--border);
@@ -96,6 +102,8 @@ html,body{height:100%;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Ro
 
 <!-- Connection status -->
 <div id="conn-bar" class="ok">Connected</div>
+<!-- Validation error display -->
+<div id="validation-bar"></div>
 
 <div id="app">
   <div id="timer-row">
@@ -300,11 +308,11 @@ function updateSoundState(data){
   if(!audioUnlocked) return;
 
   // Determine target state from booleans.
-  // evidence_for_... is THE critical boolean that triggers the alarm.
+  // Strict boolean checks — only `true` triggers; truthy strings/numbers do NOT.
   var target;
-  if(data.evidence_for_jerusalem_or_center_or_yehuda_not_just_north_or_south){
+  if(data.evidence_for_jerusalem_or_center_or_yehuda_not_just_north_or_south === true){
     target = 'alarm';
-  }else if(data.any_threat){
+  }else if(data.any_threat === true){
     target = 'tick';
   }else{
     target = 'silent';
@@ -357,6 +365,124 @@ window.unlock = function(){
 };
 
 // ================================================================
+//  DATA VALIDATION
+//
+//  Every poll response is strictly validated before rendering.
+//  Mismatches are logged loudly to the console AND shown in a
+//  persistent bar at the bottom of the screen. Nothing slides.
+// ================================================================
+
+var EXPECTED_BOOL_KEYS = [
+  'israel_attack_warning',
+  'israel_actual_red_alerts',
+  'jerusalem_attack_warning',
+  'jerusalem_actual_red_alerts',
+  'center_dan_or_or_yehuda_or_jerusalem_danger',
+  'evidence_for_jerusalem_or_center_or_yehuda_not_just_north_or_south',
+  'any_threat'
+];
+
+var EXPECTED_NEWS_STRING_KEYS = [
+  'channel', 'headline', 'importance', 'summary',
+  'time_of_report', 'time_of_event'
+];
+
+var validationErrors = [];
+
+function showValidationErrors(errors){
+  var bar = document.getElementById('validation-bar');
+  if(!errors.length){
+    bar.className = '';
+    bar.style.display = 'none';
+    return;
+  }
+  bar.className = 'visible';
+  bar.style.display = 'block';
+  bar.innerHTML = '<strong>VALIDATION (' + errors.length + ' issue'
+    + (errors.length>1?'s':'') + '):</strong><br>'
+    + errors.map(function(e){ return esc(e); }).join('<br>');
+}
+
+/** Validate the full /api/status payload. Returns the list of errors (empty = OK). */
+function validatePayload(d){
+  var errs = [];
+
+  // Must be a non-null object
+  if(d === null || typeof d !== 'object' || Array.isArray(d)){
+    errs.push('payload is not a JSON object (got ' + typeof d + ')');
+    return errs; // nothing else to check
+  }
+
+  // version: must be a finite number
+  if(typeof d.version !== 'number' || !isFinite(d.version)){
+    errs.push('version: expected number, got ' + typeof d.version + ' (' + String(d.version) + ')');
+  }else if(d.version < 0){
+    errs.push('version: expected non-negative, got ' + d.version);
+  }
+
+  // timestamp: must be a string
+  if(typeof d.timestamp !== 'string'){
+    errs.push('timestamp: expected string, got ' + typeof d.timestamp);
+  }else if(d.version > 0 && d.timestamp.length === 0){
+    errs.push('timestamp: empty string on a non-zero version (' + d.version + ')');
+  }
+
+  // Boolean fields: every one must be present and actually boolean
+  for(var i=0; i<EXPECTED_BOOL_KEYS.length; i++){
+    var key = EXPECTED_BOOL_KEYS[i];
+    if(!(key in d)){
+      errs.push(key + ': MISSING from payload');
+    }else if(typeof d[key] !== 'boolean'){
+      errs.push(key + ': expected boolean, got ' + typeof d[key] + ' (' + JSON.stringify(d[key]) + ')');
+    }
+  }
+
+  // news: must be an array
+  if(!('news' in d)){
+    errs.push('news: MISSING from payload');
+  }else if(!Array.isArray(d.news)){
+    errs.push('news: expected array, got ' + typeof d.news);
+  }else{
+    // Validate each news item
+    for(var j=0; j<d.news.length; j++){
+      var item = d.news[j];
+      var prefix = 'news[' + j + ']';
+      if(item === null || typeof item !== 'object' || Array.isArray(item)){
+        errs.push(prefix + ': expected object, got ' + typeof item);
+        continue;
+      }
+      for(var k=0; k<EXPECTED_NEWS_STRING_KEYS.length; k++){
+        var skey = EXPECTED_NEWS_STRING_KEYS[k];
+        if(!(skey in item)){
+          errs.push(prefix + '.' + skey + ': MISSING');
+        }else if(typeof item[skey] !== 'string'){
+          errs.push(prefix + '.' + skey + ': expected string, got '
+            + typeof item[skey] + ' (' + JSON.stringify(item[skey]) + ')');
+        }
+      }
+    }
+  }
+
+  // Warn about unexpected top-level keys (may indicate schema drift)
+  var KNOWN_KEYS = {
+    version:1, timestamp:1, news:1,
+    israel_attack_warning:1, israel_actual_red_alerts:1,
+    jerusalem_attack_warning:1, jerusalem_actual_red_alerts:1,
+    center_dan_or_or_yehuda_or_jerusalem_danger:1,
+    evidence_for_jerusalem_or_center_or_yehuda_not_just_north_or_south:1,
+    any_threat:1
+  };
+  var dKeys = Object.keys(d);
+  for(var m=0; m<dKeys.length; m++){
+    if(!KNOWN_KEYS[dKeys[m]]){
+      errs.push('unexpected key: "' + dKeys[m] + '" (not in known schema)');
+    }
+  }
+
+  return errs;
+}
+
+// ================================================================
 //  TIMER
 // ================================================================
 function updateTimer(){
@@ -398,7 +524,9 @@ function renderThreat(d){
   var panel  = document.getElementById('threat-panel');
   var header = document.getElementById('threat-header');
   var bools  = document.getElementById('threat-bools');
-  if(d.any_threat){
+  // Strict boolean check — treat non-boolean any_threat as false
+  var anyThreat = d.any_threat === true;
+  if(anyThreat){
     panel.className = 'alert';
     header.innerHTML = '<span style="color:var(--red)">\u26A0 THREAT ALERT \u2014 WAKE UP \u26A0</span>';
   }else{
@@ -408,7 +536,8 @@ function renderThreat(d){
   var html = '';
   for(var i=0; i<BOOLS.length; i++){
     var key=BOOLS[i][0], label=BOOLS[i][1];
-    var v = !!d[key];
+    // Strict: only true boolean counts, anything else is false
+    var v = d[key] === true;
     html += '<div class="bool-row"><span class="bool-badge '+(v?'yes':'no')+'">'
       +(v?'YES':'no')+'</span><span class="bool-label '
       +(v?'active':'inactive')+'">'+label+'</span></div>';
@@ -416,21 +545,39 @@ function renderThreat(d){
   bools.innerHTML = html;
 }
 
+function safeStr(v, fallback){
+  return typeof v === 'string' ? v : (fallback || '');
+}
+
 function renderNews(items){
   var list = document.getElementById('news-list');
-  if(!items || !items.length){
+  if(!Array.isArray(items) || !items.length){
     list.innerHTML = '<div class="empty-msg">No notable updates</div>';
     return;
   }
   var html = '';
   for(var i=0; i<items.length; i++){
     var it = items[i];
-    var cls = it.importance.toLowerCase();
-    html += '<div class="news-card"><span class="tag '+cls+'">'+esc(it.importance)
-      +'</span><div class="headline">'+esc(it.headline)
-      +'</div><div class="channel">'+esc(it.channel)
-      +'</div><div class="summary">'+esc(it.summary)+'</div></div>';
+    if(it === null || typeof it !== 'object' || Array.isArray(it)){
+      console.error('[RENDER] news[' + i + '] is not an object, skipping');
+      continue;
+    }
+    var importance = safeStr(it.importance, 'unknown');
+    var cls = importance.toLowerCase();
+    var headline = safeStr(it.headline, '(no headline)');
+    var channel = safeStr(it.channel, '(unknown channel)');
+    var summary = safeStr(it.summary, '');
+    var timeReport = safeStr(it.time_of_report);
+    var timeEvent = safeStr(it.time_of_event);
+    var timeStr = '';
+    if(timeReport) timeStr += ' \u00B7 reported '+esc(timeReport);
+    if(timeEvent) timeStr += ' \u00B7 event '+esc(timeEvent);
+    html += '<div class="news-card"><span class="tag '+cls+'">'+esc(importance)
+      +'</span><div class="headline">'+esc(headline)
+      +'</div><div class="channel">'+esc(channel)+timeStr
+      +'</div><div class="summary">'+esc(summary)+'</div></div>';
   }
+  if(!html) html = '<div class="empty-msg">No renderable news items</div>';
   list.innerHTML = html;
 }
 
@@ -472,19 +619,39 @@ async function poll(){
     if(!resp.ok) throw new Error('HTTP ' + resp.status);
     var d = await resp.json();
 
+    // ── VALIDATE PAYLOAD ──
+    var vErrs = validatePayload(d);
+    if(vErrs.length > 0){
+      for(var vi=0; vi<vErrs.length; vi++){
+        console.error('[VALIDATION] ' + vErrs[vi]);
+      }
+      showValidationErrors(vErrs);
+    }else{
+      showValidationErrors([]);
+    }
+
+    // If payload is not even an object, skip everything
+    if(d === null || typeof d !== 'object' || Array.isArray(d)){
+      throw new Error('payload is not a JSON object');
+    }
+
     // ── SUCCESS ──
     var wasDown = consecutiveFails > 0;
     consecutiveFails = 0;
 
-    if(d.version > 0){
-      var isNew = (d.version !== lastVersion);
+    // Coerce version to number for safety (in case server sends string)
+    var ver = typeof d.version === 'number' ? d.version : Number(d.version);
+    if(!isFinite(ver)) ver = 0;
+
+    if(ver > 0){
+      var isNew = (ver !== lastVersion);
       if(isNew){
-        lastVersion  = d.version;
-        lastTimestamp = d.timestamp;
+        lastVersion  = ver;
+        lastTimestamp = typeof d.timestamp === 'string' ? d.timestamp : '';
         lastData     = d;
         everHadData  = true;
         renderThreat(d);
-        renderNews(d.news);
+        renderNews(Array.isArray(d.news) ? d.news : []);
       }
       setConnStatus('ok','');
 
@@ -507,7 +674,7 @@ async function poll(){
 
     if(wasDown && lastData){
       renderThreat(lastData);
-      renderNews(lastData.news);
+      renderNews(Array.isArray(lastData.news) ? lastData.news : []);
     }
 
   }catch(e){

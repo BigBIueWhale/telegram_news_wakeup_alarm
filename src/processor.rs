@@ -46,6 +46,10 @@ struct NewsItem {
     channel: String,
     headline: String,
     importance: String,
+    #[serde(default)]
+    time_of_report: String,
+    #[serde(default)]
+    time_of_event: String,
     summary: String,
 }
 
@@ -397,6 +401,8 @@ fn build_prompt_text(
       "channel": "channel name",
       "headline": "concise headline (max 15 words)",
       "importance": "critical|high|medium|low",
+      "time_of_report": "HH:MM",
+      "time_of_event": "HH:MM or unknown",
       "summary": "1-2 sentence information-dense summary"
     }}
   ],
@@ -653,7 +659,12 @@ fn process_and_print_output(raw_response: &str, web_state: &SharedWebState) {
                 for item in &output.updates {
                     let color = importance_color(&item.importance);
                     let tag = item.importance.to_uppercase();
-                    println!("  {BOLD}{color}[{tag}]{RESET}  {BOLD}{}{RESET}", item.headline);
+                    let time_info = match (item.time_of_report.is_empty(), item.time_of_event.is_empty()) {
+                        (false, false) => format!(" {DIM}reported {} / event {}{RESET}", item.time_of_report, item.time_of_event),
+                        (false, true) => format!(" {DIM}reported {}{RESET}", item.time_of_report),
+                        _ => String::new(),
+                    };
+                    println!("  {BOLD}{color}[{tag}]{RESET}  {BOLD}{}{RESET}{time_info}", item.headline);
                     println!("         {DIM}{YELLOW}{}{RESET}", item.channel);
                     println!("         {}", item.summary);
                     println!();
@@ -676,6 +687,8 @@ fn process_and_print_output(raw_response: &str, web_state: &SharedWebState) {
                     channel: it.channel.clone(),
                     headline: it.headline.clone(),
                     importance: it.importance.clone(),
+                    time_of_report: it.time_of_report.clone(),
+                    time_of_event: it.time_of_event.clone(),
                     summary: it.summary.clone(),
                 }).collect();
             }
