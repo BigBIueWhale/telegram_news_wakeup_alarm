@@ -8,7 +8,10 @@ use tokio_util::sync::CancellationToken;
 #[tokio::main]
 async fn main() -> Result<()> {
     // Initialize logging (INFO level by default; set RUST_LOG for finer control).
-    simple_logger::init_with_level(log::Level::Info)
+    simple_logger::SimpleLogger::new()
+        .with_level(log::LevelFilter::Info)
+        .with_module_level("grammers_session::message_box", log::LevelFilter::Warn)
+        .init()
         .context("failed to initialize logger — is another logger already registered?")?;
 
     // Load and validate all configuration from environment variables.
