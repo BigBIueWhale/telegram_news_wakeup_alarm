@@ -451,13 +451,13 @@ var soundState      = 'silent';  // 'silent' | 'tick' | 'alarm'
 //
 //  Audio files:
 //
-//  alarm.mp3 — Generated from alarm.wav:
-//    ffmpeg -i alarm.wav -codec:a libmp3lame -b:a 128k alarm.mp3
+//  alarm.mp3 — Generated from alarm.wav (boosted +19dB to near 0dB peak):
+//    ffmpeg -i alarm.wav -af "volume=19dB" -codec:a libmp3lame -b:a 128k alarm.mp3
 //
 //  tick.mp3 — Generated programmatically:
-//    ffmpeg -f lavfi -i "aevalsrc='sin(800*2*PI*t)*exp(-200*t)*0.15':s=44100:d=0.15" \
+//    ffmpeg -f lavfi -i "aevalsrc='sin(800*2*PI*t)*exp(-8*t)':s=44100:d=0.25" \
 //      -codec:a libmp3lame -b:a 128k tick.mp3
-//    (150ms, 800Hz sine with exponential decay, ~3KB)
+//    (250ms, 800Hz sine, full amplitude, slow decay, ~5KB)
 //
 //  Both files are pre-loaded at page load so they're cached and
 //  available instantly, even in a bomb shelter with no internet.
@@ -482,7 +482,7 @@ function preloadAudio(){
   // ── Alarm ──
   console.log('[ALARM:LOAD] Pre-loading alarm.mp3');
   try{
-    alarmEl = new Audio('/alarm.mp3');
+    alarmEl = new Audio('/alarm.mp3?v=2');
     alarmEl.loop = true;
     alarmEl.volume = 1.0;
     alarmEl.preload = 'auto';
@@ -503,12 +503,12 @@ function preloadAudio(){
 
   // ── Tick ──
   // Pre-load so the first play() doesn't have network latency.
-  // Each tick creates a fresh Audio('/tick.mp3') because reusing
+  // Each tick creates a fresh Audio('/tick.mp3?v=2') because reusing
   // one element with currentTime=0 is unreliable on smart TVs.
   // The browser cache ensures this is instant after the first load.
   console.log('[TICK:LOAD] Pre-loading tick.mp3');
   try{
-    var tickPreload = new Audio('/tick.mp3');
+    var tickPreload = new Audio('/tick.mp3?v=2');
     tickPreload.preload = 'auto';
     tickPreload.volume = 0;
     tickPreload.addEventListener('canplaythrough', function(){
@@ -597,7 +597,7 @@ function stopAlarm(){
 // ================================================================
 //  TICK — start / stop
 //
-//  Each tick creates a fresh Audio('/tick.mp3') element. This is
+//  Each tick creates a fresh Audio('/tick.mp3?v=2') element. This is
 //  the only approach that works reliably on smart TVs (reusing one
 //  element with currentTime=0 fails on short clips). The file is
 //  3KB and served from browser cache after the initial preload.
@@ -605,8 +605,8 @@ function stopAlarm(){
 
 function playOneTick(){
   try{
-    var t = new Audio('/tick.mp3');
-    t.volume = 0.3;
+    var t = new Audio('/tick.mp3?v=2');
+    t.volume = 1.0;
     var p = t.play();
     if(p && typeof p.catch === 'function') p.catch(function(){});
   }catch(e){}
@@ -710,7 +710,7 @@ window.unlock = function(){
 
   // Pre-interact with tick by playing one silently
   try{
-    var t = new Audio('/tick.mp3');
+    var t = new Audio('/tick.mp3?v=2');
     t.volume = 0;
     var pt = t.play();
     if(pt && typeof pt.then === 'function'){
