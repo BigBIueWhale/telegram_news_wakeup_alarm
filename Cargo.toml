@@ -12,11 +12,11 @@ name = "news-alarm"
 path = "src/main.rs"
 
 [dependencies]
-# Telegram MTProto client (grammers ecosystem — git for latest fixes per author recommendation)
-grammers-client = { git = "https://codeberg.org/Lonami/grammers.git" }
-grammers-session = { git = "https://codeberg.org/Lonami/grammers.git" }
-grammers-mtsender = { git = "https://codeberg.org/Lonami/grammers.git" }
-grammers-tl-types = { git = "https://codeberg.org/Lonami/grammers.git" }
+# Telegram MTProto client (grammers v0.9.0 — pinned to tested commit, crates.io lags behind)
+grammers-client = { git = "https://codeberg.org/Lonami/grammers.git", rev = "ec8880bf" }
+grammers-session = { git = "https://codeberg.org/Lonami/grammers.git", rev = "ec8880bf" }
+grammers-mtsender = { git = "https://codeberg.org/Lonami/grammers.git", rev = "ec8880bf" }
+grammers-tl-types = { git = "https://codeberg.org/Lonami/grammers.git", rev = "ec8880bf" }
 
 # Async runtime (grammers requires tokio)
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "signal"] }
@@ -26,7 +26,7 @@ reqwest = { version = "0.12", features = ["json", "stream"] }
 futures-util = "0.3"
 
 # Qwen 3.5 tokenizer (byte-level BPE, loads tokenizer.json natively)
-tokenizers = "0.22"
+tokenizers = "0.22.2"
 
 # Per-channel 512-message circular buffer (const-generic, auto-eviction)
 circular-buffer = "1.2"
@@ -36,10 +36,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 # Timestamps (transitive dep of grammers, zero additional cost)
-chrono = "0.4"
+chrono = "0.4.44"
 
 # Error handling — dynamic context-rich error chains, no silent fallbacks
-anyhow = "1"
+anyhow = "1.0.102"
 
 # Logging
 log = "0.4"

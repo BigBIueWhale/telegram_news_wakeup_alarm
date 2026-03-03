@@ -1,4 +1,6 @@
 /target
+# grammers SQLite session files — contain Telegram auth keys, peer cache, and update state.
+# Anyone with this file has full access to the Telegram account. Never commit.
 *.session
 .env
 SECRETS_README.md
