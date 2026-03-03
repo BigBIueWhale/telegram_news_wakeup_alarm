@@ -19,8 +19,11 @@ pub struct WebUpdate {
     pub timestamp: String,
     /// Threat assessment fields.
     /// Non-empty string = active threat (5-word reason why). Empty string = no threat.
+    // Israel-wide (informational)
     pub israel_attack_warning: String,
     pub israel_actual_red_alerts: String,
+    pub attack_involves_missiles_not_just_uavs: String,
+    // Center / Jerusalem (alarm triggers)
     pub jerusalem_attack_warning: String,
     pub jerusalem_actual_red_alerts: String,
     pub center_dan_or_yehuda_or_jerusalem_danger: String,

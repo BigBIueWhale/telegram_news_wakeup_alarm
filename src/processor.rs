@@ -29,10 +29,16 @@ struct NewsOutput {
     // Threat assessment fields — the whole point of this alarm system.
     // Non-empty string = active threat (5-word reason why).
     // Empty string = no threat.
+    //
+    // Group 1: Israel-wide (informational — don't trigger alarm alone)
     #[serde(default)]
     israel_attack_warning: String,
     #[serde(default)]
     israel_actual_red_alerts: String,
+    #[serde(default)]
+    attack_involves_missiles_not_just_uavs: String,
+    //
+    // Group 2: Center / Jerusalem (these trigger alarm)
     #[serde(default)]
     jerusalem_attack_warning: String,
     #[serde(default)]
@@ -418,6 +424,7 @@ fn build_prompt_text(
 {{
   "israel_attack_warning": "",
   "israel_actual_red_alerts": "",
+  "attack_involves_missiles_not_just_uavs": "",
   "jerusalem_attack_warning": "",
   "jerusalem_actual_red_alerts": "",
   "center_dan_or_yehuda_or_jerusalem_danger": "",
@@ -440,7 +447,7 @@ fn build_prompt_text(
 }}
 
 CRITICAL — THREAT ASSESSMENT FIELDS:
-The six threat fields at the top are the PRIMARY PURPOSE of this system. They are used to wake someone sleeping in Jerusalem to reach a bomb shelter in time. Each field is a STRING, not a boolean:
+The seven threat fields at the top are the PRIMARY PURPOSE of this system. They are used to wake someone sleeping in Jerusalem to reach a bomb shelter in time. Each field is a STRING, not a boolean:
 - When active (threat detected): provide EXACTLY 5 words explaining WHY this is active. This reason is displayed to the user so they immediately understand the situation when woken up.
 - When inactive (no threat): use an empty string "".
 
@@ -450,6 +457,7 @@ ONCE A DANGER HAS PASSED, ALL FIELDS MUST RETURN TO EMPTY STRING "". If messages
 
 - israel_attack_warning: Non-empty if there is ANY early warning, intelligence, or credible report of an incoming or imminent attack on Israel (missiles, drones, rockets from Iran, Hezbollah, Yemen, etc.). Includes launch detections, military alerts, and "prepare for attack" announcements. Must be CURRENT — not past attacks or theoretical future threats. Example: "Iran launched missiles toward Israel"
 - israel_actual_red_alerts: Non-empty if Pikud HaOref (Home Front Command) has activated actual red alert sirens ANYWHERE in Israel, or if credible sources report active sirens/interceptions RIGHT NOW. Example: "Red alert sirens across Israel"
+- attack_involves_missiles_not_just_uavs: Non-empty if the CURRENT attack involves missiles, rockets, or ballistic threats — not just UAVs/drones. UAV attacks on northern or southern Israel are routine and do NOT warrant waking someone in Jerusalem. Only set non-empty when the threat type is missiles, rockets, cruise missiles, or ballistic projectiles. If the attack is UAV-only but targets center Israel, leave this "" (the center-specific fields handle that separately). Example: "Ballistic missiles launched from Iran"
 - jerusalem_attack_warning: Non-empty if there is ANY warning or credible report specifically mentioning Jerusalem as a target or at-risk area. Also non-empty if merkaz/center Israel is targeted (missiles to merkaz pass directly over Jerusalem). Example: "Missiles targeting center over Jerusalem"
 - jerusalem_actual_red_alerts: Non-empty if red alert sirens are active specifically in Jerusalem RIGHT NOW. Example: "Active sirens sounding in Jerusalem"
 - center_dan_or_yehuda_or_jerusalem_danger: Non-empty if any of these areas are at IMMINENT risk: Gush Dan, Yehuda, Jerusalem, Merkaz (center Israel). Even if the target is Merkaz and not explicitly Jerusalem, set this non-empty because the flight path crosses over Jerusalem. Example: "Missiles inbound to Gush Dan"
@@ -653,8 +661,10 @@ fn process_and_print_output(raw_response: &str, web_state: &SharedWebState) {
 
     match serde_json::from_str::<NewsOutput>(json_str) {
         Ok(output) => {
-            let any_threat = !output.israel_attack_warning.is_empty()
-                || !output.israel_actual_red_alerts.is_empty()
+            // any_threat drives ticking sound + red background.
+            // Israel-wide fields alone don't trigger it — north/south UAVs aren't
+            // worth waking up for. Only center fields OR missiles trigger alarm.
+            let any_threat = !output.attack_involves_missiles_not_just_uavs.is_empty()
                 || !output.jerusalem_attack_warning.is_empty()
                 || !output.jerusalem_actual_red_alerts.is_empty()
                 || !output.center_dan_or_yehuda_or_jerusalem_danger.is_empty()
@@ -675,13 +685,16 @@ fn process_and_print_output(raw_response: &str, web_state: &SharedWebState) {
             }
             println!();
             println!("  {BOLD}{MAGENTA}Threat Assessment{RESET}");
-            println!("  {DIM}─────────────────────────────────────────{RESET}");
-            println!("{}", fmt_threat("Israel attack warning", &output.israel_attack_warning));
-            println!("{}", fmt_threat("Israel red alerts active", &output.israel_actual_red_alerts));
-            println!("{}", fmt_threat("Jerusalem attack warning", &output.jerusalem_attack_warning));
-            println!("{}", fmt_threat("Jerusalem red alerts active", &output.jerusalem_actual_red_alerts));
-            println!("{}", fmt_threat("Center/Dan/Yehuda/Jerusalem danger", &output.center_dan_or_yehuda_or_jerusalem_danger));
-            println!("{}", fmt_threat("Confirmed attack on Center/Jlem/Dan/Yehuda (not just N/S)", &output.confirmed_center_attack_not_just_north_south));
+            println!("  {DIM}── Israel ──────────────────────────────{RESET}");
+            println!("{}", fmt_threat("Attack warning", &output.israel_attack_warning));
+            println!("{}", fmt_threat("Red alerts active", &output.israel_actual_red_alerts));
+            println!("{}", fmt_threat("Missiles (not just UAVs)", &output.attack_involves_missiles_not_just_uavs));
+            println!("  {DIM}── Jerusalem ──────────────────────────{RESET}");
+            println!("{}", fmt_threat("Attack warning", &output.jerusalem_attack_warning));
+            println!("{}", fmt_threat("Red alerts active", &output.jerusalem_actual_red_alerts));
+            println!("  {DIM}── Center / Dan / Yehuda ──────────────{RESET}");
+            println!("{}", fmt_threat("Imminent danger", &output.center_dan_or_yehuda_or_jerusalem_danger));
+            println!("{}", fmt_threat("Confirmed attack (not just N/S)", &output.confirmed_center_attack_not_just_north_south));
             println!("  {DIM}─────────────────────────────────────────{RESET}");
             println!();
 
@@ -714,6 +727,7 @@ fn process_and_print_output(raw_response: &str, web_state: &SharedWebState) {
                 ws.timestamp = Utc::now().to_rfc3339();
                 ws.israel_attack_warning = output.israel_attack_warning.clone();
                 ws.israel_actual_red_alerts = output.israel_actual_red_alerts.clone();
+                ws.attack_involves_missiles_not_just_uavs = output.attack_involves_missiles_not_just_uavs.clone();
                 ws.jerusalem_attack_warning = output.jerusalem_attack_warning.clone();
                 ws.jerusalem_actual_red_alerts = output.jerusalem_actual_red_alerts.clone();
                 ws.center_dan_or_yehuda_or_jerusalem_danger = output.center_dan_or_yehuda_or_jerusalem_danger.clone();

@@ -64,6 +64,9 @@ html,body{height:100%;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Ro
 .bool-label.inactive{color:var(--dim)}
 .bool-reason{font-size:.8rem;font-weight:600;color:var(--yellow);line-height:1.3;
   min-height:1.1rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.bool-group-header{font-size:.75rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;
+  color:var(--magenta);padding:8px 0 2px;margin-top:4px;border-top:1px solid var(--border)}
+.bool-group-header:first-child{margin-top:0;border-top:none;padding-top:0}
 
 /* News cards */
 #news-section{margin-top:8px}
@@ -384,6 +387,7 @@ window.unlock = function(){
 var EXPECTED_THREAT_STRING_KEYS = [
   'israel_attack_warning',
   'israel_actual_red_alerts',
+  'attack_involves_missiles_not_just_uavs',
   'jerusalem_attack_warning',
   'jerusalem_actual_red_alerts',
   'center_dan_or_yehuda_or_jerusalem_danger',
@@ -492,6 +496,7 @@ function validatePayload(d){
   var KNOWN_KEYS = {
     version:1, timestamp:1, idle_since:1, news:1,
     israel_attack_warning:1, israel_actual_red_alerts:1,
+    attack_involves_missiles_not_just_uavs:1,
     jerusalem_attack_warning:1, jerusalem_actual_red_alerts:1,
     center_dan_or_yehuda_or_jerusalem_danger:1,
     confirmed_center_attack_not_just_north_south:1,
@@ -562,13 +567,19 @@ function updateIdleTimer(){
 // ================================================================
 //  RENDERING
 // ================================================================
-var BOOLS = [
-  ['israel_attack_warning','Israel attack warning'],
-  ['israel_actual_red_alerts','Israel red alerts active'],
-  ['jerusalem_attack_warning','Jerusalem attack warning'],
-  ['jerusalem_actual_red_alerts','Jerusalem red alerts active'],
-  ['center_dan_or_yehuda_or_jerusalem_danger','Center / Dan / Yehuda / Jerusalem danger'],
-  ['confirmed_center_attack_not_just_north_south','Confirmed attack on Center / Jerusalem / Gush Dan / Yehuda (not just N/S)']
+// Four visual groups for the threat panel.
+// {group:...} entries render as subheaders.
+var THREAT_ROWS = [
+  {group:'Israel'},
+  ['israel_attack_warning','Attack warning'],
+  ['israel_actual_red_alerts','Red alerts active'],
+  ['attack_involves_missiles_not_just_uavs','Missiles (not just UAVs)'],
+  {group:'Jerusalem'},
+  ['jerusalem_attack_warning','Attack warning'],
+  ['jerusalem_actual_red_alerts','Red alerts active'],
+  {group:'Center / Dan / Yehuda'},
+  ['center_dan_or_yehuda_or_jerusalem_danger','Imminent danger'],
+  ['confirmed_center_attack_not_just_north_south','Confirmed attack (not just N/S)']
 ];
 
 function esc(s){
@@ -589,9 +600,13 @@ function renderThreat(d){
     header.innerHTML = '<span style="color:var(--green)">ALL CLEAR</span>';
   }
   var html = '';
-  for(var i=0; i<BOOLS.length; i++){
-    var key=BOOLS[i][0], label=BOOLS[i][1];
-    // Threat fields are now strings: non-empty = active with reason.
+  for(var i=0; i<THREAT_ROWS.length; i++){
+    var row = THREAT_ROWS[i];
+    if(row.group){
+      html += '<div class="bool-group-header">'+esc(row.group)+'</div>';
+      continue;
+    }
+    var key=row[0], label=row[1];
     var reason = typeof d[key] === 'string' ? d[key] : '';
     var active = reason.length > 0;
     html += '<div class="bool-row"><span class="bool-badge '+(active?'yes':'no')+'">'
