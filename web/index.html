@@ -209,23 +209,57 @@ var tickBuffer     = null;      // pre-decoded AudioBuffer for tick click
 
 // ── Alarm: <audio> element with loop, max volume ──
 
+// Eagerly fetch alarm.wav into memory at page load so it's available
+// even in a bomb shelter with very slow or no internet later.
+var alarmBlobUrl = null;
+
 function initAlarmElement(){
   // Create once. Re-use forever.
   if(alarmEl) return;
-  alarmEl = new Audio('/alarm.wav');
-  alarmEl.loop = true;
-  alarmEl.volume = 1.0;
-  alarmEl.preload = 'auto';
-  alarmEl.addEventListener('canplaythrough', function(){
-    alarmReady = true;
-  }, {once:true});
-  // If alarm.wav fails to load, alarmReady stays false.
-  // startAlarm() falls back to a generated Web Audio siren.
-  alarmEl.addEventListener('error', function(){
-    console.warn('alarm.wav failed to load — will use generated fallback');
-    alarmReady = false;
-  }, {once:true});
+
+  function createFromUrl(url){
+    alarmEl = new Audio(url);
+    alarmEl.loop = true;
+    alarmEl.volume = 1.0;
+    alarmEl.preload = 'auto';
+    alarmEl.addEventListener('canplaythrough', function(){
+      alarmReady = true;
+    }, {once:true});
+    alarmEl.addEventListener('error', function(){
+      console.warn('alarm.wav failed to load — will use generated fallback');
+      alarmReady = false;
+    }, {once:true});
+  }
+
+  if(alarmBlobUrl){
+    // Already fetched into memory — use the blob URL (works offline)
+    createFromUrl(alarmBlobUrl);
+  }else{
+    // Fallback: use network URL directly (preload=auto is a hint, not guaranteed)
+    createFromUrl('/alarm.wav');
+  }
 }
+
+// Eagerly fetch the entire alarm.wav into a blob at page load.
+// This ensures the file is fully in memory before an emergency.
+fetch('/alarm.wav').then(function(r){
+  if(!r.ok) throw new Error('HTTP ' + r.status);
+  return r.blob();
+}).then(function(blob){
+  alarmBlobUrl = URL.createObjectURL(blob);
+  console.log('alarm.wav pre-cached into memory (' + blob.size + ' bytes)');
+  // If the Audio element was already created from the network URL,
+  // replace it with the blob version so it works offline.
+  if(alarmEl){
+    var wasReady = alarmReady;
+    alarmEl = null;
+    alarmReady = false;
+    initAlarmElement();
+    if(wasReady) alarmReady = true;
+  }
+}).catch(function(e){
+  console.warn('alarm.wav pre-cache failed — will load on demand or use fallback:', e);
+});
 
 function startAlarm(){
   if(alarmReady && alarmEl){
