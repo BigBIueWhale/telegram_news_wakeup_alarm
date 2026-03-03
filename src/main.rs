@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use std::sync::Arc;
 use std::time::Duration;
-use telegram_news_alarm::{buffer::ChannelBuffers, config::Config, ollama::OllamaClient, processor, telegram};
+use telegram_news_alarm::{buffer::ChannelBuffers, config::Config, ollama::OllamaClient, processor, telegram, web};
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
@@ -57,6 +57,17 @@ async fn main() -> Result<()> {
     // Shared shutdown signal: cancelled when the Telegram listener exits (Ctrl+C or fatal error).
     let shutdown = CancellationToken::new();
 
+    // Shared web state: written by processor, read by HTTP server.
+    let web_state = web::new_shared_state();
+
+    // Start the web dashboard server (runs until the process exits).
+    let web_state_server = web_state.clone();
+    tokio::spawn(async move {
+        if let Err(e) = web::run_server(web_state_server).await {
+            log::error!("Web server error: {:#}", e);
+        }
+    });
+
     // The processor must NOT start until Telegram authentication is complete,
     // otherwise its periodic log output interferes with the interactive login prompt.
     // run_listener signals the Notify after auth + peer cache are done.
@@ -65,10 +76,11 @@ async fn main() -> Result<()> {
     let processor_buffers = buffers.clone();
     let processor_shutdown = shutdown.clone();
     let processor_ready = Arc::clone(&telegram_ready);
+    let processor_web_state = web_state.clone();
     let processor_handle = tokio::spawn(async move {
         processor_ready.notified().await;
         log::info!("Telegram authenticated — starting LLM processor");
-        processor::run_loop(processor_buffers, tokenizer, ollama, processor_shutdown).await
+        processor::run_loop(processor_buffers, tokenizer, ollama, processor_shutdown, processor_web_state).await
     });
 
     // Run the Telegram listener with automatic reconnection on failure.

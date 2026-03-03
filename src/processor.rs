@@ -1,7 +1,9 @@
 use crate::buffer::{ChannelMessage, ChannelBuffers, ChannelSnapshot};
 use crate::ollama::OllamaClient;
+use crate::web::{SharedWebState, WebNewsItem};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use chrono_tz::Asia::Jerusalem as TZ_JERUSALEM;
 use serde::Deserialize;
 use std::collections::VecDeque;
 use std::fmt::Write as _;
@@ -82,6 +84,7 @@ pub async fn run_loop(
     tokenizer: Tokenizer,
     ollama: OllamaClient,
     shutdown: CancellationToken,
+    web_state: SharedWebState,
 ) -> Result<()> {
     let mut consecutive_errors: u32 = 0;
     // Track timestamps of productive iterations for rolling average interval.
@@ -215,7 +218,7 @@ pub async fn run_loop(
                         // Step 4: Parse and display output
                         log::info!("[processor] Parsing LLM response...");
                         let step_start = Instant::now();
-                        process_and_print_output(&response);
+                        process_and_print_output(&response, &web_state);
                         log::info!(
                             "[processor] Output processed ({})",
                             format_duration(step_start.elapsed())
@@ -324,24 +327,35 @@ fn build_prompt_text(
     let total_msgs: usize = channel_messages.iter().map(|(_, msgs)| msgs.len()).sum();
     let num_channels = channel_messages.len();
 
+    // Convert UTC to Jerusalem local time for display.
+    let newest_local = newest.with_timezone(&TZ_JERUSALEM);
+    let cutoff_local = focus_cutoff.with_timezone(&TZ_JERUSALEM);
+
     // Pre-allocate generously: ~256 bytes per message + prompt boilerplate
     let mut prompt = String::with_capacity(total_msgs * 256 + 4096);
 
     writeln!(
         &mut prompt,
         "You are a real-time news analyst. Below are the latest messages from \
-         {} Telegram news channels ({} messages total).",
+         {} Telegram news channels ({} messages total). All times are Jerusalem local time (Israel Standard/Daylight Time).",
         num_channels, total_msgs
     )
     .unwrap();
     writeln!(&mut prompt).unwrap();
     writeln!(
         &mut prompt,
+        "CURRENT TIME: {} (Jerusalem). This is the timestamp of the most recent message received.",
+        newest_local.format("%Y-%m-%d %H:%M:%S"),
+    )
+    .unwrap();
+    writeln!(&mut prompt).unwrap();
+    writeln!(
+        &mut prompt,
         "YOUR TASK: Analyze ONLY the most recent {} minutes of activity \
-         (from {} UTC to {} UTC). Earlier messages are provided for background context only.",
+         (from {} to {}). Earlier messages are provided for background context only.",
         focus_minutes,
-        focus_cutoff.format("%H:%M:%S"),
-        newest.format("%H:%M:%S"),
+        cutoff_local.format("%H:%M:%S"),
+        newest_local.format("%H:%M:%S"),
     )
     .unwrap();
     writeln!(&mut prompt).unwrap();
@@ -351,10 +365,11 @@ fn build_prompt_text(
         writeln!(&mut prompt).unwrap();
         writeln!(&mut prompt, "--- {} ---", snap.channel_title).unwrap();
         for msg in msgs {
+            let local_time = msg.date.with_timezone(&TZ_JERUSALEM);
             writeln!(
                 &mut prompt,
-                "[{} UTC] {}",
-                msg.date.format("%Y-%m-%d %H:%M:%S"),
+                "[{}] {}",
+                local_time.format("%Y-%m-%d %H:%M:%S"),
                 msg.text
             )
             .unwrap();
@@ -393,16 +408,16 @@ fn build_prompt_text(
 }}
 
 CRITICAL — THREAT ASSESSMENT BOOLEANS:
-The six boolean fields at the top are the PRIMARY PURPOSE of this system. They are used to wake someone sleeping in Jerusalem to reach a bomb shelter in time. Set them based on ANY evidence in the messages — even a single credible report is enough.
+The six boolean fields at the top are the PRIMARY PURPOSE of this system. They are used to wake someone sleeping in Jerusalem to reach a bomb shelter in time. Set them based on ANY evidence in the messages — even a single credible report is enough. These booleans must reflect IMMINENT, ACTIVE threats that warrant waking someone up RIGHT NOW to run to a shelter.
 
-- israel_attack_warning: TRUE if there is ANY early warning, intelligence, or credible report of an incoming or imminent attack on Israel (missiles, drones, rockets from Iran, Hezbollah, Yemen, etc.). Includes launch detections, military alerts, and "prepare for attack" announcements.
-- israel_actual_red_alerts: TRUE if Pikud HaOref (Home Front Command) has activated actual red alert sirens ANYWHERE in Israel, or if credible sources report active sirens/interceptions.
+- israel_attack_warning: TRUE if there is ANY early warning, intelligence, or credible report of an incoming or imminent attack on Israel (missiles, drones, rockets from Iran, Hezbollah, Yemen, etc.). Includes launch detections, military alerts, and "prepare for attack" announcements. Must be CURRENT — not past attacks or theoretical future threats.
+- israel_actual_red_alerts: TRUE if Pikud HaOref (Home Front Command) has activated actual red alert sirens ANYWHERE in Israel, or if credible sources report active sirens/interceptions RIGHT NOW.
 - jerusalem_attack_warning: TRUE if there is ANY warning or credible report specifically mentioning Jerusalem as a target or at-risk area. Also TRUE if merkaz/center Israel is targeted (missiles to merkaz pass directly over Jerusalem).
-- jerusalem_actual_red_alerts: TRUE if red alert sirens are active specifically in Jerusalem.
-- center_dan_or_or_yehuda_or_jerusalem_danger: TRUE if any of these areas are at risk: Gush Dan, Or Yehuda, Jerusalem, Merkaz (center Israel). Even if the target is Merkaz and not explicitly Jerusalem, set this TRUE because the flight path crosses over Jerusalem.
-- evidence_for_jerusalem_or_center_or_yehuda_not_just_north_or_south: TRUE if the evidence suggests the attack targets Jerusalem, Merkaz, Gush Dan, Yehuda, or areas in their immediate vicinity — and NOT exclusively the far north or far south. Set FALSE if the ONLY areas mentioned are north of Netanya (Haifa, Galilee, Golan, Tiberias, Acre, etc.) or are Negev/Eilat/Yam HaMelach (Dead Sea) with no mention of Yehuda or areas close to Jerusalem. Set TRUE if: (a) central Israel / Merkaz / Gush Dan / Tel Aviv / Jerusalem / Yehuda are mentioned, OR (b) the target is ambiguous/broad ("missiles at Israel" with no specific region), OR (c) both north AND center are targeted. The key question: "Could these missiles endanger someone in Jerusalem?" — if yes or uncertain, TRUE.
+- jerusalem_actual_red_alerts: TRUE if red alert sirens are active specifically in Jerusalem RIGHT NOW.
+- center_dan_or_or_yehuda_or_jerusalem_danger: TRUE if any of these areas are at IMMINENT risk: Gush Dan, Or Yehuda, Jerusalem, Merkaz (center Israel). Even if the target is Merkaz and not explicitly Jerusalem, set this TRUE because the flight path crosses over Jerusalem.
+- evidence_for_jerusalem_or_center_or_yehuda_not_just_north_or_south: This boolean answers: "Is there an IMMINENT threat RIGHT NOW that could endanger someone sleeping in Jerusalem, urgent enough to wake them up?" Set TRUE ONLY if there is current, active danger — NOT for past attacks, general security analysis, or future speculation. Set FALSE if the ONLY areas mentioned are north of Netanya (Haifa, Galilee, Golan, Tiberias, Acre, etc.) or are Negev/Eilat/Yam HaMelach (Dead Sea) with no mention of Yehuda or areas close to Jerusalem. Set TRUE if: (a) central Israel / Merkaz / Gush Dan / Tel Aviv / Jerusalem / Yehuda are under active or imminent attack, OR (b) the target is ambiguous/broad ("missiles at Israel" with no specific region) and the attack is happening NOW, OR (c) both north AND center are targeted simultaneously.
 
-IMPORTANT CONTEXT: Pikud HaOref often fails to give Jerusalem explicit early warning. By the time Jerusalem gets an actual siren (~1.5 min warning), Iranian missiles may already be overhead on their way to Merkaz. The user needs ~7 minutes from EARLY WARNING to reach shelter. Therefore: err on the side of TRUE for any boolean where there is reasonable doubt. A false positive (unnecessary wake-up) is infinitely better than a false negative (sleeping through an attack).
+IMPORTANT CONTEXT: Pikud HaOref often fails to give Jerusalem explicit early warning. By the time Jerusalem gets an actual siren (~1.5 min warning), Iranian missiles may already be overhead on their way to Merkaz. The user needs ~7 minutes from EARLY WARNING to reach shelter. Therefore: err on the side of TRUE for any boolean where there is reasonable doubt about an ACTIVE threat. A false positive (unnecessary wake-up) is infinitely better than a false negative (sleeping through an attack). But do NOT set booleans TRUE for past events, historical analysis, or speculative future threats — only for RIGHT NOW.
 
 Rules:
 - Include ONLY genuinely notable news updates from the last {focus_minutes} minutes
@@ -412,7 +427,7 @@ Rules:
 - Output ONLY valid JSON, nothing else"#,
         num_channels = num_channels,
         focus_minutes = focus_minutes,
-        now = newest.to_rfc3339(),
+        now = newest_local.to_rfc3339(),
     )
     .unwrap();
 
@@ -588,9 +603,9 @@ fn importance_color(importance: &str) -> &'static str {
 
 // ── Output processing ──
 
-/// Parse the LLM response as JSON, print a human-readable summary to stdout.
-/// If the JSON is malformed, print the raw output with a warning.
-fn process_and_print_output(raw_response: &str) {
+/// Parse the LLM response as JSON, print a human-readable summary to stdout,
+/// and update the shared web state for the dashboard.
+fn process_and_print_output(raw_response: &str, web_state: &SharedWebState) {
     let cleaned = strip_think_blocks(raw_response);
     let json_str = extract_json(&cleaned);
 
@@ -603,7 +618,7 @@ fn process_and_print_output(raw_response: &str) {
                 || output.center_dan_or_or_yehuda_or_jerusalem_danger
                 || output.evidence_for_jerusalem_or_center_or_yehuda_not_just_north_or_south;
 
-            let now = Utc::now().format("%H:%M:%S UTC");
+            let now = Utc::now().with_timezone(&TZ_JERUSALEM).format("%H:%M:%S");
 
             // ── Threat assessment panel (always shown) ──
             println!();
@@ -644,6 +659,26 @@ fn process_and_print_output(raw_response: &str) {
                     println!();
                 }
             }
+
+            // Update shared web state for the dashboard.
+            {
+                let mut ws = web_state.write().expect("web state lock poisoned");
+                ws.version += 1;
+                ws.timestamp = Utc::now().to_rfc3339();
+                ws.israel_attack_warning = output.israel_attack_warning;
+                ws.israel_actual_red_alerts = output.israel_actual_red_alerts;
+                ws.jerusalem_attack_warning = output.jerusalem_attack_warning;
+                ws.jerusalem_actual_red_alerts = output.jerusalem_actual_red_alerts;
+                ws.center_dan_or_or_yehuda_or_jerusalem_danger = output.center_dan_or_or_yehuda_or_jerusalem_danger;
+                ws.evidence_for_jerusalem_or_center_or_yehuda_not_just_north_or_south = output.evidence_for_jerusalem_or_center_or_yehuda_not_just_north_or_south;
+                ws.any_threat = any_threat;
+                ws.news = output.updates.iter().map(|it| WebNewsItem {
+                    channel: it.channel.clone(),
+                    headline: it.headline.clone(),
+                    importance: it.importance.clone(),
+                    summary: it.summary.clone(),
+                }).collect();
+            }
         }
         Err(e) => {
             log::warn!(
@@ -654,7 +689,7 @@ fn process_and_print_output(raw_response: &str) {
             );
             println!(
                 "{YELLOW}[{}] (raw){RESET} {}",
-                Utc::now().format("%H:%M:%S UTC"),
+                Utc::now().with_timezone(&TZ_JERUSALEM).format("%H:%M:%S"),
                 cleaned.trim()
             );
         }

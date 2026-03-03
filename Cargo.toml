@@ -37,12 +37,17 @@ serde_json = "1"
 
 # Timestamps (transitive dep of grammers, zero additional cost)
 chrono = "0.4.44"
+chrono-tz = "0.10"
 
 # Error handling — dynamic context-rich error chains, no silent fallbacks
 anyhow = "1.0.102"
 
 # Graceful shutdown (CancellationToken for cooperative task cancellation)
 tokio-util = { version = "0.7", features = ["rt"] }
+
+# HTTP server for the real-time web dashboard
+axum = "0.8"
+tower-http = { version = "0.6", features = ["fs"] }
 
 # Logging
 log = "0.4"

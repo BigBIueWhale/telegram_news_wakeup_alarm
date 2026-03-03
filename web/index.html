@@ -1,0 +1,570 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>News Alarm</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+:root{
+  --bg:#0d1117;--card:#161b22;--border:#30363d;
+  --text:#e6edf3;--dim:#8b949e;--green:#3fb950;
+  --red:#f85149;--yellow:#d29922;--cyan:#58a6ff;
+  --magenta:#bc8cff;--urgentbg:#6e1010;
+}
+html,body{height:100%;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+  background:var(--bg);color:var(--text);overflow-x:hidden}
+
+/* Welcome overlay (Chrome autoplay policy) */
+#welcome{position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,0.95);
+  display:flex;flex-direction:column;align-items:center;justify-content:center;
+  transition:opacity .3s}
+#welcome.hidden{opacity:0;pointer-events:none}
+#welcome h1{font-size:2rem;margin-bottom:1rem;color:var(--cyan)}
+#welcome p{color:var(--dim);margin-bottom:2rem;text-align:center;max-width:24rem;line-height:1.5}
+#welcome button{font-size:1.3rem;padding:1rem 3rem;border:none;border-radius:12px;
+  background:var(--cyan);color:var(--bg);cursor:pointer;font-weight:700;
+  transition:transform .1s}
+#welcome button:active{transform:scale(0.95)}
+
+/* Connection status bar */
+#conn-bar{position:fixed;top:0;left:0;right:0;z-index:100;padding:6px 12px;
+  font-size:.8rem;font-weight:600;text-align:center;transition:all .3s}
+#conn-bar.ok{background:transparent;color:transparent;height:0;padding:0;overflow:hidden}
+#conn-bar.warn{background:#6e4400;color:#ffc}
+#conn-bar.err{background:var(--urgentbg);color:#fcc}
+#conn-bar.restarted{background:#1a3a5c;color:#8cf}
+
+/* Main layout */
+#app{padding:12px;padding-top:8px;max-width:700px;margin:0 auto;min-height:100vh}
+
+/* Timer */
+#timer-row{display:flex;align-items:center;justify-content:center;gap:8px;
+  margin-bottom:12px;font-size:.85rem;color:var(--dim)}
+#timer-val{font-variant-numeric:tabular-nums;font-weight:600}
+
+/* Threat panel */
+#threat-panel{border-radius:12px;padding:16px;margin-bottom:16px}
+#threat-panel.clear{background:var(--card);border:1px solid var(--border)}
+#threat-panel.alert{background:var(--urgentbg);border:2px solid var(--red);
+  animation:pulse 1.5s infinite}
+@keyframes pulse{0%,100%{box-shadow:0 0 0 0 rgba(248,81,73,0.4)}50%{box-shadow:0 0 20px 4px rgba(248,81,73,0.3)}}
+#threat-header{font-size:1.3rem;font-weight:700;margin-bottom:12px;text-align:center}
+.bool-row{display:flex;align-items:center;gap:10px;padding:5px 0;font-size:.9rem}
+.bool-badge{display:inline-block;min-width:3.2rem;text-align:center;padding:2px 8px;
+  border-radius:6px;font-weight:700;font-size:.8rem}
+.bool-badge.yes{background:var(--red);color:#fff}
+.bool-badge.no{background:#1a2a1a;color:var(--green);opacity:.5}
+.bool-label{flex:1}
+.bool-label.active{color:var(--red);font-weight:600}
+.bool-label.inactive{color:var(--dim)}
+
+/* News cards */
+#news-section{margin-top:8px}
+#news-header{font-size:1rem;font-weight:600;color:var(--cyan);margin-bottom:10px}
+.news-card{background:var(--card);border:1px solid var(--border);border-radius:10px;
+  padding:12px 14px;margin-bottom:10px}
+.news-card .tag{display:inline-block;padding:2px 8px;border-radius:5px;
+  font-size:.7rem;font-weight:700;text-transform:uppercase;margin-right:6px}
+.tag.critical{background:var(--red);color:#fff}
+.tag.high{background:var(--yellow);color:#000}
+.tag.medium{background:var(--cyan);color:#000}
+.tag.low{background:var(--border);color:var(--dim)}
+.news-card .headline{font-weight:600;font-size:.95rem;margin-top:4px}
+.news-card .channel{font-size:.75rem;color:var(--dim);margin-top:2px}
+.news-card .summary{font-size:.85rem;color:var(--text);margin-top:6px;line-height:1.4}
+
+.empty-msg{color:var(--dim);text-align:center;padding:2rem 0;font-size:.9rem}
+
+/* Loading skeleton */
+#loading{text-align:center;padding:3rem 0;color:var(--dim)}
+#loading .spinner{display:inline-block;width:32px;height:32px;border:3px solid var(--border);
+  border-top-color:var(--cyan);border-radius:50%;animation:spin .8s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+</style>
+</head>
+<body>
+
+<!-- Welcome overlay for Chrome autoplay unlock -->
+<div id="welcome">
+  <h1>News Alarm</h1>
+  <p>This dashboard monitors Telegram news channels for threat alerts. Tap below to enable sound alerts.</p>
+  <button onclick="unlock()">Enable Alerts &amp; Enter</button>
+</div>
+
+<!-- Connection status -->
+<div id="conn-bar" class="ok">Connected</div>
+
+<div id="app">
+  <div id="timer-row">
+    <span>Last LLM update:</span>
+    <span id="timer-val">&mdash;</span>
+  </div>
+
+  <div id="threat-panel" class="clear">
+    <div id="threat-header"></div>
+    <div id="threat-bools"></div>
+  </div>
+
+  <div id="news-section">
+    <div id="news-header">News Updates</div>
+    <div id="news-list">
+      <div id="loading"><div class="spinner"></div><p style="margin-top:12px">Waiting for first update&hellip;</p></div>
+    </div>
+  </div>
+</div>
+
+<script>
+(function(){
+"use strict";
+
+// ================================================================
+//  CONFIGURATION
+// ================================================================
+var POLL_NORMAL   = 2000;
+var POLL_THREAT   = 1000;
+var FETCH_TIMEOUT = 8000;
+
+// ================================================================
+//  STATE
+// ================================================================
+var audioCtx       = null;
+var audioUnlocked  = false;
+var lastVersion    = -1;
+var lastTimestamp   = null;
+var lastData       = null;
+var consecutiveFails = 0;
+var pollTimer      = null;
+var pollInFlight   = false;
+var timerHandle    = null;
+var everHadData    = false;
+
+// ================================================================
+//  AUDIO ENGINE
+//
+//  Three mutually-exclusive sound states, driven by booleans:
+//
+//    'alarm'  — evidence_for_jerusalem_or_center_or_yehuda boolean
+//               is TRUE. alarm.wav loops at max volume until it
+//               goes FALSE. This is the wake-up-or-die sound.
+//
+//    'tick'   — any OTHER threat boolean is TRUE (but not the
+//               evidence one). A soft periodic tick every 1s.
+//               "Something is happening, stay aware."
+//
+//    'silent' — all booleans FALSE. No sound at all.
+//
+//  updateSoundState(data) is called on EVERY successful poll.
+//  It is fully idempotent: if the target state matches the
+//  current state, it does nothing. Transitions are instant.
+//
+//  On connection loss, sound continues based on last known state.
+//  This is intentional: if we lose WiFi during an attack, the
+//  alarm must NOT stop.
+// ================================================================
+
+var soundState     = 'silent';  // current: 'silent' | 'tick' | 'alarm'
+var alarmEl        = null;      // <audio> element for alarm.wav
+var alarmReady     = false;     // true once alarm.wav is loadable
+var tickTimer      = null;      // setInterval handle for tick
+var tickBuffer     = null;      // pre-decoded AudioBuffer for tick click
+
+// ── Alarm: <audio> element with loop, max volume ──
+
+function initAlarmElement(){
+  // Create once. Re-use forever.
+  if(alarmEl) return;
+  alarmEl = new Audio('/alarm.wav');
+  alarmEl.loop = true;
+  alarmEl.volume = 1.0;
+  alarmEl.preload = 'auto';
+  alarmEl.addEventListener('canplaythrough', function(){
+    alarmReady = true;
+  }, {once:true});
+  // If alarm.wav fails to load, alarmReady stays false.
+  // startAlarm() falls back to a generated Web Audio siren.
+  alarmEl.addEventListener('error', function(){
+    console.warn('alarm.wav failed to load — will use generated fallback');
+    alarmReady = false;
+  }, {once:true});
+}
+
+function startAlarm(){
+  if(alarmReady && alarmEl){
+    alarmEl.volume = 1.0;
+    alarmEl.currentTime = 0;
+    alarmEl.play().catch(function(e){
+      console.warn('alarm.wav play failed, using fallback:', e);
+      startAlarmFallback();
+    });
+  }else{
+    startAlarmFallback();
+  }
+}
+
+function stopAlarm(){
+  if(alarmEl){
+    alarmEl.pause();
+    alarmEl.currentTime = 0;
+  }
+  stopAlarmFallback();
+}
+
+// Fallback: Web Audio generated siren that loops via a recurring timer
+var fallbackTimer = null;
+
+function playFallbackBurst(){
+  ensureAudioCtx();
+  if(!audioCtx) return;
+  var now = audioCtx.currentTime;
+  for(var i=0; i<3; i++){
+    var osc = audioCtx.createOscillator();
+    var g = audioCtx.createGain();
+    osc.connect(g); g.connect(audioCtx.destination);
+    osc.type = 'square';
+    osc.frequency.setValueAtTime(800,  now+i*0.6);
+    osc.frequency.setValueAtTime(1200, now+i*0.6+0.3);
+    g.gain.setValueAtTime(0.3, now+i*0.6);
+    g.gain.setValueAtTime(0,   now+i*0.6+0.58);
+    osc.start(now+i*0.6); osc.stop(now+i*0.6+0.6);
+  }
+}
+
+function startAlarmFallback(){
+  if(fallbackTimer) return; // already running
+  playFallbackBurst();
+  fallbackTimer = setInterval(playFallbackBurst, 2000);
+}
+
+function stopAlarmFallback(){
+  if(fallbackTimer){ clearInterval(fallbackTimer); fallbackTimer = null; }
+}
+
+// ── Tick: soft click every 1s via Web Audio ──
+
+function buildTickBuffer(){
+  ensureAudioCtx();
+  if(!audioCtx || tickBuffer) return;
+  // Short 20ms click: a damped sine at 800Hz
+  var sr = audioCtx.sampleRate;
+  var len = Math.floor(sr * 0.02); // 20ms
+  var buf = audioCtx.createBuffer(1, len, sr);
+  var data = buf.getChannelData(0);
+  for(var i=0; i<len; i++){
+    var t = i/sr;
+    // Sine burst with exponential decay
+    data[i] = Math.sin(2 * Math.PI * 800 * t) * Math.exp(-t * 200) * 0.12;
+  }
+  tickBuffer = buf;
+}
+
+function playOneTick(){
+  ensureAudioCtx();
+  if(!audioCtx) return;
+  if(!tickBuffer) buildTickBuffer();
+  if(!tickBuffer) return;
+  var src = audioCtx.createBufferSource();
+  src.buffer = tickBuffer;
+  src.connect(audioCtx.destination);
+  src.start(0);
+}
+
+function startTick(){
+  if(tickTimer) return; // already ticking
+  buildTickBuffer();
+  playOneTick(); // immediate first tick
+  tickTimer = setInterval(playOneTick, 1000);
+}
+
+function stopTick(){
+  if(tickTimer){ clearInterval(tickTimer); tickTimer = null; }
+}
+
+// ── AudioContext management ──
+
+function ensureAudioCtx(){
+  if(!audioCtx || audioCtx.state === 'closed'){
+    try{ audioCtx = new(window.AudioContext||window.webkitAudioContext)(); }
+    catch(e){ return; }
+  }
+  if(audioCtx.state === 'suspended'){
+    audioCtx.resume().catch(function(){});
+  }
+}
+
+// ── The core state machine: called on every poll ──
+
+function updateSoundState(data){
+  if(!audioUnlocked) return;
+
+  // Determine target state from booleans.
+  // evidence_for_... is THE critical boolean that triggers the alarm.
+  var target;
+  if(data.evidence_for_jerusalem_or_center_or_yehuda_not_just_north_or_south){
+    target = 'alarm';
+  }else if(data.any_threat){
+    target = 'tick';
+  }else{
+    target = 'silent';
+  }
+
+  // Idempotent: no-op if already in the right state.
+  if(target === soundState) return;
+
+  // Transition: stop old, start new.
+  if(soundState === 'alarm'){ stopAlarm(); }
+  if(soundState === 'tick') { stopTick(); }
+
+  if(target === 'alarm'){ startAlarm(); }
+  if(target === 'tick') { startTick(); }
+
+  soundState = target;
+}
+
+// ── Unlock (Chrome/Safari autoplay policy) ──
+
+window.unlock = function(){
+  // Create and unlock AudioContext
+  try{
+    audioCtx = new(window.AudioContext||window.webkitAudioContext)();
+    var buf = audioCtx.createBuffer(1, 1, 22050);
+    var src = audioCtx.createBufferSource();
+    src.buffer = buf; src.connect(audioCtx.destination); src.start(0);
+  }catch(e){ console.warn('AudioContext init failed', e); }
+
+  // Pre-interact with alarm.wav so the browser allows future playback
+  initAlarmElement();
+  if(alarmEl){
+    alarmEl.volume = 0;
+    alarmEl.play().then(function(){
+      alarmEl.pause();
+      alarmEl.currentTime = 0;
+      alarmEl.volume = 1.0;
+    }).catch(function(){});
+  }
+
+  // Pre-build tick buffer
+  buildTickBuffer();
+
+  audioUnlocked = true;
+  document.getElementById('welcome').classList.add('hidden');
+  startPolling();
+
+  // If we already have data (e.g. from a pre-unlock fetch), apply sound now
+  if(lastData) updateSoundState(lastData);
+};
+
+// ================================================================
+//  TIMER
+// ================================================================
+function updateTimer(){
+  var el = document.getElementById('timer-val');
+  if(!lastTimestamp){ el.textContent = '\u2014'; el.style.color='var(--dim)'; return; }
+  var diff = Math.floor((Date.now() - new Date(lastTimestamp).getTime())/1000);
+  if(diff < 0){ el.textContent = 'just now'; el.style.color='var(--dim)'; return; }
+  var m = Math.floor(diff/60), s = diff%60;
+  if(m >= 60){
+    var h = Math.floor(m/60);
+    el.textContent = h+'h '+String(m%60).padStart(2,'0')+'m ago';
+    el.style.color = 'var(--red)';
+  }else if(m >= 5){
+    el.textContent = m+'m '+String(s).padStart(2,'0')+'s ago';
+    el.style.color = 'var(--yellow)';
+  }else{
+    el.textContent = m+'m '+String(s).padStart(2,'0')+'s ago';
+    el.style.color = 'var(--dim)';
+  }
+}
+
+// ================================================================
+//  RENDERING
+// ================================================================
+var BOOLS = [
+  ['israel_attack_warning','Israel attack warning'],
+  ['israel_actual_red_alerts','Israel red alerts active'],
+  ['jerusalem_attack_warning','Jerusalem attack warning'],
+  ['jerusalem_actual_red_alerts','Jerusalem red alerts active'],
+  ['center_dan_or_or_yehuda_or_jerusalem_danger','Center / Dan / Or Yehuda / Jerusalem danger'],
+  ['evidence_for_jerusalem_or_center_or_yehuda_not_just_north_or_south','Evidence for Jlem / Center / Yehuda (not just N/S)']
+];
+
+function esc(s){
+  var d = document.createElement('div'); d.textContent = s; return d.innerHTML;
+}
+
+function renderThreat(d){
+  var panel  = document.getElementById('threat-panel');
+  var header = document.getElementById('threat-header');
+  var bools  = document.getElementById('threat-bools');
+  if(d.any_threat){
+    panel.className = 'alert';
+    header.innerHTML = '<span style="color:var(--red)">\u26A0 THREAT ALERT \u2014 WAKE UP \u26A0</span>';
+  }else{
+    panel.className = 'clear';
+    header.innerHTML = '<span style="color:var(--green)">ALL CLEAR</span>';
+  }
+  var html = '';
+  for(var i=0; i<BOOLS.length; i++){
+    var key=BOOLS[i][0], label=BOOLS[i][1];
+    var v = !!d[key];
+    html += '<div class="bool-row"><span class="bool-badge '+(v?'yes':'no')+'">'
+      +(v?'YES':'no')+'</span><span class="bool-label '
+      +(v?'active':'inactive')+'">'+label+'</span></div>';
+  }
+  bools.innerHTML = html;
+}
+
+function renderNews(items){
+  var list = document.getElementById('news-list');
+  if(!items || !items.length){
+    list.innerHTML = '<div class="empty-msg">No notable updates</div>';
+    return;
+  }
+  var html = '';
+  for(var i=0; i<items.length; i++){
+    var it = items[i];
+    var cls = it.importance.toLowerCase();
+    html += '<div class="news-card"><span class="tag '+cls+'">'+esc(it.importance)
+      +'</span><div class="headline">'+esc(it.headline)
+      +'</div><div class="channel">'+esc(it.channel)
+      +'</div><div class="summary">'+esc(it.summary)+'</div></div>';
+  }
+  list.innerHTML = html;
+}
+
+function showLoading(msg){
+  document.getElementById('news-list').innerHTML =
+    '<div id="loading"><div class="spinner"></div>'
+    +'<p style="margin-top:12px">'+msg+'</p></div>';
+}
+
+function setConnStatus(cls, msg){
+  var bar = document.getElementById('conn-bar');
+  bar.className = cls; bar.textContent = msg;
+}
+
+// ================================================================
+//  POLLING ENGINE
+// ================================================================
+
+function schedulePoll(delayMs){
+  if(pollTimer !== null){ clearTimeout(pollTimer); pollTimer = null; }
+  pollTimer = setTimeout(poll, delayMs);
+}
+
+async function poll(){
+  if(pollInFlight){ schedulePoll(500); return; }
+  pollInFlight = true;
+
+  try{
+    var ctrl = new AbortController();
+    var tid = setTimeout(function(){ ctrl.abort(); }, FETCH_TIMEOUT);
+
+    var resp = await fetch('/api/status', {
+      signal:  ctrl.signal,
+      cache:   'no-store',
+      headers: {'Accept':'application/json'}
+    });
+    clearTimeout(tid);
+
+    if(!resp.ok) throw new Error('HTTP ' + resp.status);
+    var d = await resp.json();
+
+    // ── SUCCESS ──
+    var wasDown = consecutiveFails > 0;
+    consecutiveFails = 0;
+
+    if(d.version > 0){
+      var isNew = (d.version !== lastVersion);
+      if(isNew){
+        lastVersion  = d.version;
+        lastTimestamp = d.timestamp;
+        lastData     = d;
+        everHadData  = true;
+        renderThreat(d);
+        renderNews(d.news);
+      }
+      setConnStatus('ok','');
+
+      // Drive sound from current state on EVERY successful poll,
+      // not just on version changes. This ensures sound tracks
+      // truth even if the version didn't change but we need to
+      // re-assert state (e.g. after tab foreground or reconnect).
+      updateSoundState(d);
+
+    }else{
+      if(everHadData){
+        setConnStatus('restarted','Server restarted \u2014 waiting for next LLM update\u2026');
+      }else{
+        showLoading('Waiting for first LLM update\u2026');
+        setConnStatus('ok','');
+      }
+      lastVersion = -1;
+      // Don't touch sound — keep whatever was playing from last known state.
+    }
+
+    if(wasDown && lastData){
+      renderThreat(lastData);
+      renderNews(lastData.news);
+    }
+
+  }catch(e){
+    consecutiveFails++;
+    if(consecutiveFails === 1){
+      setConnStatus('warn','Reconnecting\u2026');
+    }else if(consecutiveFails >= 3){
+      setConnStatus('err','Connection lost \u2014 retrying\u2026 (' + consecutiveFails + ')');
+    }
+    // Sound continues based on last known state. Intentional:
+    // if WiFi drops during an attack, alarm must NOT stop.
+  }finally{
+    pollInFlight = false;
+  }
+
+  schedulePoll(soundState === 'alarm' ? POLL_THREAT : POLL_NORMAL);
+}
+
+// ================================================================
+//  PAGE VISIBILITY
+// ================================================================
+document.addEventListener('visibilitychange', function(){
+  if(document.visibilityState === 'visible'){
+    ensureAudioCtx();
+    updateTimer();
+    // Re-assert sound state (AudioContext may have been suspended)
+    if(lastData) updateSoundState(lastData);
+    if(pollTimer !== null){ clearTimeout(pollTimer); pollTimer = null; }
+    schedulePoll(200);
+  }
+});
+
+window.addEventListener('pageshow', function(e){
+  if(e.persisted){
+    ensureAudioCtx();
+    updateTimer();
+    if(lastData) updateSoundState(lastData);
+    if(pollTimer !== null){ clearTimeout(pollTimer); pollTimer = null; }
+    schedulePoll(200);
+  }
+});
+
+// ================================================================
+//  STARTUP
+// ================================================================
+function startPolling(){
+  if(timerHandle) clearInterval(timerHandle);
+  timerHandle = setInterval(updateTimer, 1000);
+  updateTimer();
+  poll();
+}
+
+// Pre-create alarm element so the browser starts fetching alarm.wav
+// even before unlock. Playback won't work until unlock() is called.
+initAlarmElement();
+
+})();
+</script>
+</body>
+</html>
