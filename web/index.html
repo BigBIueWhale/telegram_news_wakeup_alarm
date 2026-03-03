@@ -128,6 +128,12 @@ html,body{height:100%;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Ro
   <h1>News Alarm</h1>
   <p>This dashboard monitors Telegram news channels for threat alerts. Tap below to enable sound alerts.</p>
   <button onclick="unlock()">Enable Alerts &amp; Enter</button>
+  <div style="margin-top:2rem;display:flex;gap:12px;justify-content:center;flex-wrap:wrap">
+    <button onclick="testSound('alarm')" style="font-size:.9rem;padding:.5rem 1.2rem;border:none;border-radius:8px;
+      background:var(--red);color:#fff;cursor:pointer;font-weight:600">Test Alarm</button>
+    <button onclick="testSound('tick')" style="font-size:.9rem;padding:.5rem 1.2rem;border:none;border-radius:8px;
+      background:var(--yellow);color:#000;cursor:pointer;font-weight:600">Test Tick</button>
+  </div>
 </div>
 
 <!-- Connection status -->
@@ -479,6 +485,49 @@ window.unlock = function(){
 
   // Polling is already running (started on page load). Apply sound to current data.
   if(lastData) updateSoundState(lastData);
+};
+
+// ── Test sound from the welcome screen ──
+// Plays the chosen sound for 3 seconds, then stops and cleans up.
+// Does NOT set audioUnlocked or dismiss the overlay — unlock() still
+// runs normally afterward. Safe to call multiple times.
+var testSoundTimer = null;
+
+window.testSound = function(which){
+  // Stop any previous test in progress
+  if(testSoundTimer){ clearTimeout(testSoundTimer); testSoundTimer = null; }
+  stopAlarm();
+  stopTick();
+
+  // Initialize audio (same as unlock, but without setting audioUnlocked)
+  try{
+    if(!audioCtx || audioCtx.state === 'closed'){
+      audioCtx = new(window.AudioContext||window.webkitAudioContext)();
+    }
+    var buf = audioCtx.createBuffer(1, 1, 22050);
+    var src = audioCtx.createBufferSource();
+    src.buffer = buf; src.connect(audioCtx.destination); src.start(0);
+  }catch(e){}
+  if(audioCtx && audioCtx.state === 'suspended'){
+    var p = audioCtx.resume();
+    if(p && typeof p.catch === 'function') p.catch(function(){});
+  }
+
+  if(which === 'alarm'){
+    initAlarmElement();
+    startAlarm();
+  }else{
+    buildTickBuffer();
+    startTick();
+  }
+
+  // Auto-stop after 3 seconds
+  testSoundTimer = setTimeout(function(){
+    stopAlarm();
+    stopTick();
+    soundState = 'silent';
+    testSoundTimer = null;
+  }, 3000);
 };
 
 // ================================================================
