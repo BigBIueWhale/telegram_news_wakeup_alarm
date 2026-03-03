@@ -47,6 +47,11 @@ impl ChannelBuffers {
     /// Push a new message into the appropriate channel's ring buffer.
     /// If the buffer is full (512 messages), the oldest message is silently evicted.
     /// Creates a new buffer for previously-unseen channels.
+    ///
+    /// **Deduplication:** skips the push if a message with the same `id` already
+    /// exists in that channel's buffer. This is needed because both the update
+    /// stream and the `getChannelDifference` poll loop deliver the same messages.
+    /// Scanning up to 512 `i32` IDs is negligible overhead.
     pub fn push(&self, msg: ChannelMessage) {
         let mut map = self.inner.write().expect(
             "channel buffer RwLock poisoned — a task panicked while holding the write lock; \
@@ -55,6 +60,9 @@ impl ChannelBuffers {
         let buffer = map
             .entry(msg.channel_id)
             .or_insert_with(CircularBuffer::boxed);
+        if buffer.iter().any(|existing| existing.id == msg.id) {
+            return;
+        }
         buffer.push_back(msg);
     }
 

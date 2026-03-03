@@ -3,12 +3,16 @@ mod auth;
 use crate::buffer::{ChannelBuffers, ChannelMessage};
 use crate::config::{self, Config};
 use anyhow::{Context, Result};
+use chrono::{TimeZone, Utc};
 use grammers_client::client::UpdatesConfiguration;
 use grammers_client::peer::Peer;
 use grammers_client::update::Update;
 use grammers_client::{Client, SenderPool};
+use grammers_mtsender::InvocationError;
 use grammers_session::storages::SqliteSession;
 use grammers_session::types::PeerRef;
+use grammers_tl_types as tl;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Notify;
@@ -173,6 +177,14 @@ pub async fn run_listener(config: &Config, buffers: &ChannelBuffers, ready: Opti
         channels.len()
     );
 
+    // 4c. Spawn the active channel polling task (getChannelDifference).
+    //     This delivers messages with ~1s latency vs ~30-40s on the passive stream.
+    //     Dedup in ChannelBuffers::push handles overlap with the update stream.
+    let poll_client = client.clone();
+    let poll_channels = channels.clone();
+    let poll_buffers = buffers.clone();
+    let poll_task = tokio::spawn(channel_poll_loop(poll_client, poll_channels, poll_buffers));
+
     // Signal that authentication, peer cache, and history backfill are complete.
     // The caller uses this to know when it's safe to start the LLM processor
     // (which will now have full buffers from its very first run).
@@ -259,7 +271,8 @@ pub async fn run_listener(config: &Config, buffers: &ChannelBuffers, ready: Opti
         }
     };
 
-    // 7. Cleanup: always save state before disconnecting, regardless of why we're stopping.
+    // 7. Cleanup: stop the poll task and save state before disconnecting.
+    poll_task.abort();
     log::info!("Saving Telegram update state before disconnect...");
     stream.sync_update_state().await;
     handle.quit();
@@ -271,6 +284,173 @@ pub async fn run_listener(config: &Config, buffers: &ChannelBuffers, ready: Opti
     log::info!("Telegram connection closed");
 
     result
+}
+
+/// Actively poll `updates.getChannelDifference` for each monitored channel to
+/// receive new messages with ~1s latency (vs 30-40s on the passive update stream).
+///
+/// This mirrors what official Telegram apps do for channels the user is "viewing".
+/// The dedup logic in `ChannelBuffers::push` handles overlap with the update stream.
+///
+/// Runs until the task is aborted (on shutdown or reconnection).
+async fn channel_poll_loop(
+    client: Client,
+    channels: Vec<(PeerRef, String, i64)>,
+    buffers: ChannelBuffers,
+) {
+    // Per-channel pts tracking. Initialized to 1 (will trigger TooLong on first
+    // call, which gives us the current pts — after that we get incremental diffs).
+    let mut pts_map: HashMap<i64, i32> = channels
+        .iter()
+        .map(|(_, _, channel_id)| (*channel_id, 1))
+        .collect();
+
+    log::info!(
+        "Channel poll loop started for {} channels",
+        channels.len()
+    );
+
+    loop {
+        let mut min_timeout: u32 = 1; // default 1 second if no server timeout
+
+        for (peer_ref, title, channel_id) in &channels {
+            let pts = pts_map.get(channel_id).copied().unwrap_or(1);
+            let input_channel: tl::enums::InputChannel = peer_ref.into();
+
+            // May need to re-poll if the server says the diff isn't final.
+            let mut current_pts = pts;
+            loop {
+                let request = tl::functions::updates::GetChannelDifference {
+                    force: false,
+                    channel: input_channel.clone(),
+                    filter: tl::enums::ChannelMessagesFilter::Empty,
+                    pts: current_pts,
+                    limit: 100,
+                };
+
+                match client.invoke(&request).await {
+                    Ok(tl::enums::updates::ChannelDifference::Empty(empty)) => {
+                        pts_map.insert(*channel_id, empty.pts);
+                        if let Some(t) = empty.timeout {
+                            min_timeout = min_timeout.min(t as u32);
+                        }
+                        break; // no new messages, move to next channel
+                    }
+                    Ok(tl::enums::updates::ChannelDifference::Difference(diff)) => {
+                        let msg_count = extract_and_push_messages(
+                            &diff.new_messages,
+                            title,
+                            *channel_id,
+                            &buffers,
+                        );
+                        if msg_count > 0 {
+                            log::debug!(
+                                "Channel poll [{}]: {} new messages (pts {} → {})",
+                                title,
+                                msg_count,
+                                current_pts,
+                                diff.pts
+                            );
+                        }
+                        current_pts = diff.pts;
+                        pts_map.insert(*channel_id, diff.pts);
+                        if let Some(t) = diff.timeout {
+                            min_timeout = min_timeout.min(t as u32);
+                        }
+                        if diff.r#final {
+                            break; // all caught up
+                        }
+                        // Not final — immediately re-poll this channel
+                    }
+                    Ok(tl::enums::updates::ChannelDifference::TooLong(too_long)) => {
+                        // Extract pts from the dialog object
+                        let new_pts = match &too_long.dialog {
+                            tl::enums::Dialog::Dialog(d) => d.pts.unwrap_or(current_pts),
+                            tl::enums::Dialog::Folder(_) => current_pts,
+                        };
+                        let msg_count = extract_and_push_messages(
+                            &too_long.messages,
+                            title,
+                            *channel_id,
+                            &buffers,
+                        );
+                        if msg_count > 0 || current_pts == 1 {
+                            log::debug!(
+                                "Channel poll [{}]: TooLong, {} messages, pts {} → {}",
+                                title,
+                                msg_count,
+                                current_pts,
+                                new_pts
+                            );
+                        }
+                        pts_map.insert(*channel_id, new_pts);
+                        if let Some(t) = too_long.timeout {
+                            min_timeout = min_timeout.min(t as u32);
+                        }
+                        break;
+                    }
+                    Err(InvocationError::Rpc(rpc_err)) if rpc_err.is("FLOOD_WAIT") => {
+                        let wait_secs = rpc_err.value.unwrap_or(5);
+                        log::warn!(
+                            "Channel poll [{}]: FLOOD_WAIT_{} — backing off",
+                            title,
+                            wait_secs
+                        );
+                        tokio::time::sleep(Duration::from_secs(wait_secs as u64)).await;
+                        break; // move to next channel after waiting
+                    }
+                    Err(InvocationError::Rpc(rpc_err))
+                        if rpc_err.is("CHANNEL_PRIVATE") || rpc_err.is("CHANNEL_INVALID") =>
+                    {
+                        log::error!(
+                            "Channel poll [{}]: {} — skipping permanently",
+                            title,
+                            rpc_err.name
+                        );
+                        break;
+                    }
+                    Err(e) => {
+                        log::warn!("Channel poll [{}]: error: {} — retrying in 5s", title, e);
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                        break;
+                    }
+                }
+            }
+        }
+
+        tokio::time::sleep(Duration::from_secs(min_timeout as u64)).await;
+    }
+}
+
+/// Extract text messages from raw TL `Message` objects and push them into the
+/// shared buffers. Returns the number of messages successfully pushed.
+fn extract_and_push_messages(
+    messages: &[tl::enums::Message],
+    channel_title: &str,
+    channel_id: i64,
+    buffers: &ChannelBuffers,
+) -> usize {
+    let mut count = 0;
+    for tl_msg in messages {
+        if let tl::enums::Message::Message(m) = tl_msg {
+            if m.message.is_empty() {
+                continue; // media-only, skip
+            }
+            let date = Utc
+                .timestamp_opt(m.date as i64, 0)
+                .single()
+                .unwrap_or_else(Utc::now);
+            buffers.push(ChannelMessage {
+                id: m.id,
+                text: m.message.clone(),
+                date,
+                channel_title: channel_title.to_string(),
+                channel_id,
+            });
+            count += 1;
+        }
+    }
+    count
 }
 
 /// Process a single Telegram update: if it's a new message from a broadcast
