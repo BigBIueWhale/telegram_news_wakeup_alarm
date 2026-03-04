@@ -101,8 +101,10 @@ pub async fn run_loop(
     let mut consecutive_errors: u32 = 0;
     // Track timestamps of productive iterations for rolling average interval.
     let mut iteration_times: VecDeque<Instant> = VecDeque::with_capacity(FREQUENCY_WINDOW + 1);
-    // Track how many messages we last processed so we only re-query when new ones arrive.
-    let mut last_processed_total: usize = 0;
+    // Track the newest message timestamp we last processed so we only re-query when
+    // genuinely new messages arrive. Using total count was broken because circular
+    // buffers evict old messages, keeping the count stable even as new ones arrive.
+    let mut last_processed_newest: Option<DateTime<Utc>> = None;
 
     loop {
         if shutdown.is_cancelled() {
@@ -170,7 +172,15 @@ pub async fn run_loop(
         }
 
         // Wait for NEW messages before re-querying the LLM with the same data.
-        if total_msgs <= last_processed_total {
+        // We compare the newest message timestamp rather than total count because
+        // the circular buffers evict old messages — count can stay flat or drop
+        // even as new messages arrive, which would starve the processor.
+        let current_newest = snapshot
+            .iter()
+            .flat_map(|s| s.messages.iter())
+            .map(|m| m.date)
+            .max();
+        if current_newest.is_some() && current_newest <= last_processed_newest {
             log::info!(
                 "[processor] No new messages since last query ({} total) — waiting 5s...",
                 total_msgs
@@ -247,7 +257,7 @@ pub async fn run_loop(
                             format_duration(step_start.elapsed())
                         );
                         consecutive_errors = 0;
-                        last_processed_total = total_msgs;
+                        last_processed_newest = current_newest;
 
                         // Step 4: Parse and display output
                         log::info!("[processor] Parsing LLM response...");
