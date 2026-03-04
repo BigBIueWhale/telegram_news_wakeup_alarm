@@ -11,6 +11,14 @@ path = "src/lib.rs"
 name = "news-alarm"
 path = "src/main.rs"
 
+[[bin]]
+name = "news-alarm-simulator"
+path = "src/bin/simulator_server.rs"
+
+[[bin]]
+name = "news-alarm-simulator-cli"
+path = "src/bin/simulator_cli.rs"
+
 [dependencies]
 # Telegram MTProto client (grammers v0.9.0 — pinned to tested commit, crates.io lags behind)
 grammers-client = { git = "https://codeberg.org/Lonami/grammers.git", rev = "ec8880bf" }
@@ -48,6 +56,9 @@ tokio-util = { version = "0.7", features = ["rt"] }
 # HTTP server for the real-time web dashboard
 axum = "0.8"
 tower-http = { version = "0.6", features = ["fs"] }
+
+# CLI argument parsing (simulator-cli)
+clap = { version = "4", features = ["derive"] }
 
 # Logging
 log = "0.4"

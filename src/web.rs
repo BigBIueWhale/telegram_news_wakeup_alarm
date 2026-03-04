@@ -4,14 +4,15 @@ use axum::http::{Method, Request, StatusCode, Uri};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::get;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 use tower_http::services::ServeDir;
+use tower_http::set_status::SetStatus;
 
 // ── Shared state written by processor, read by HTTP handlers ──
 
-#[derive(Clone, Serialize, Default)]
+#[derive(Clone, Serialize, Deserialize, Default)]
 pub struct WebUpdate {
     /// Monotonically increasing version — clients use this to detect changes.
     pub version: u64,
@@ -39,7 +40,7 @@ pub struct WebUpdate {
     pub channels: Vec<WebChannelInfo>,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct WebNewsItem {
     pub channel: String,
     pub headline: String,
@@ -49,7 +50,7 @@ pub struct WebNewsItem {
     pub summary: String,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct WebChannelInfo {
     pub name: String,
     pub message_count: usize,
@@ -65,7 +66,7 @@ pub fn new_shared_state() -> SharedWebState {
 
 // ── Error response helper ──
 
-fn error_json(status: StatusCode, message: &str) -> Response {
+pub fn error_json(status: StatusCode, message: &str) -> Response {
     let body = serde_json::json!({
         "error": status.as_u16(),
         "status": status.canonical_reason().unwrap_or("Unknown"),
@@ -76,7 +77,7 @@ fn error_json(status: StatusCode, message: &str) -> Response {
 
 // ── HTTP handlers ──
 
-async fn api_status(State(state): State<SharedWebState>) -> Json<WebUpdate> {
+pub async fn api_status(State(state): State<SharedWebState>) -> Json<WebUpdate> {
     let data = state.read().expect("web state lock poisoned").clone();
     Json(data)
 }
@@ -135,7 +136,7 @@ async fn reject_request_body(req: Request<Body>, next: Next) -> Response {
 }
 
 /// Reject URIs that are suspiciously long (path traversal probes, fuzzing).
-async fn reject_oversized_uri(req: Request<Body>, next: Next) -> Response {
+pub async fn reject_oversized_uri(req: Request<Body>, next: Next) -> Response {
     let uri_len = req.uri().to_string().len();
     if uri_len > 2048 {
         log::warn!(
@@ -157,7 +158,7 @@ async fn reject_oversized_uri(req: Request<Body>, next: Next) -> Response {
 }
 
 /// Reject requests with too many headers (header stuffing attacks).
-async fn reject_header_abuse(req: Request<Body>, next: Next) -> Response {
+pub async fn reject_header_abuse(req: Request<Body>, next: Next) -> Response {
     let header_count = req.headers().len();
     if header_count > 64 {
         log::warn!(
@@ -196,7 +197,7 @@ async fn reject_header_abuse(req: Request<Body>, next: Next) -> Response {
 
 // ── Fallback handler for unmatched routes ──
 
-async fn fallback_404(uri: Uri) -> Response {
+pub async fn fallback_404(uri: Uri) -> Response {
     error_json(
         StatusCode::NOT_FOUND,
         &format!(
@@ -209,9 +210,11 @@ async fn fallback_404(uri: Uri) -> Response {
 // ── Server entrypoint ──
 
 /// Directory containing index.html, audio files, and any other static assets.
-const WEB_DIR: &str = "web";
+pub const WEB_DIR: &str = "web";
 
-pub async fn run_server(state: SharedWebState) -> anyhow::Result<()> {
+/// Static file serving with a 404 fallback for files not found.
+/// Reusable by the simulator server (same frontend, different API).
+pub fn static_files_fallback() -> anyhow::Result<ServeDir<SetStatus<axum::routing::MethodRouter>>> {
     let web_dir = Path::new(WEB_DIR);
     if !web_dir.is_dir() {
         anyhow::bail!(
@@ -219,9 +222,11 @@ pub async fn run_server(state: SharedWebState) -> anyhow::Result<()> {
             WEB_DIR
         );
     }
+    Ok(ServeDir::new(WEB_DIR).not_found_service(axum::routing::get(fallback_404)))
+}
 
-    // Static file serving with a 404 fallback for files not found.
-    let static_files = ServeDir::new(WEB_DIR).not_found_service(axum::routing::get(fallback_404));
+pub async fn run_server(state: SharedWebState) -> anyhow::Result<()> {
+    let static_files = static_files_fallback()?;
 
     // API routes take precedence; static files are the fallback.
     let app = axum::Router::new()
@@ -235,11 +240,12 @@ pub async fn run_server(state: SharedWebState) -> anyhow::Result<()> {
         .layer(middleware::from_fn(reject_non_get));
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:9876").await?;
+    let web_path = Path::new(WEB_DIR);
     log::info!(
         "Web dashboard listening on http://0.0.0.0:9876 (serving from '{}')",
-        web_dir
+        web_path
             .canonicalize()
-            .unwrap_or_else(|_| web_dir.to_path_buf())
+            .unwrap_or_else(|_| web_path.to_path_buf())
             .display()
     );
 

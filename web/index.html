@@ -75,9 +75,16 @@ html,body{height:100%;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Ro
 .bool-label.inactive{color:var(--dim)}
 .bool-reason{font-size:.8rem;font-weight:600;color:var(--yellow);line-height:1.3;
   min-height:1.1rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.bool-group-header{font-size:.75rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;
+.bool-group-header{display:flex;justify-content:space-between;align-items:center;
+  font-size:.75rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;
   color:var(--magenta);padding:8px 0 2px;margin-top:4px;border-top:1px solid var(--border)}
 .bool-group-header:first-child{margin-top:0;border-top:none;padding-top:0}
+.group-mute-btn{padding:2px 7px;border-radius:5px;font-size:.6rem;text-transform:uppercase;
+  cursor:pointer;background:none;font-weight:700;letter-spacing:.04em;
+  display:inline-flex;align-items:center;gap:4px;line-height:1;transition:opacity .2s}
+.group-mute-btn.tick-btn{border:1.5px solid var(--yellow);color:var(--yellow)}
+.group-mute-btn.alarm-btn{border:1.5px solid var(--red);color:var(--red)}
+.group-mute-btn.muted{opacity:.4}
 
 /* News cards */
 #news-section{margin-top:16px}
@@ -460,7 +467,16 @@ var lastChannelsUpdateTime = 0;
 // ================================================================
 
 var soundState      = 'silent';  // 'silent' | 'tick' | 'alarm'
+
+// Audio element pool — iOS WebKit requires each HTML5 Audio object to
+// be *created* inside a user-gesture handler. Objects created later
+// (setTimeout, XHR callback) will have play() silently rejected.
+// Fix: pre-create a pool during the unlock tap, then draw from it.
+var _audioPool  = [];
+var _POOL_SIZE  = 10;
 var tickEnabled     = true;      // user preference: play tick sounds for minor threats
+var alarmJerusalemEnabled = true; // user preference: play alarm for Jerusalem fields
+var alarmCenterEnabled    = true; // user preference: play alarm for Center fields
 
 // ================================================================
 //  AUDIO ENGINE — <audio> ELEMENTS ONLY
@@ -516,6 +532,20 @@ var tickEnabled     = true;      // user preference: play tick sounds for minor 
 //    - TV-safe: fresh elements, ES5, no Web Audio API
 // ================================================================
 
+function obtainAudio(){
+  if(_audioPool.length) return _audioPool.pop();
+  console.warn('[POOL] Exhausted — creating new Audio (may be locked on iOS)');
+  return new Audio();
+}
+
+function releaseAudio(el){
+  if(!el) return;
+  try{ el.onended = null; }catch(e){}
+  try{ el.onerror = null; }catch(e){}
+  try{ el.pause(); }catch(e){}
+  _audioPool.push(el);
+}
+
 function SoundLoop(url, periodMs){
   this._url = url;
   this._period = periodMs;
@@ -525,22 +555,20 @@ function SoundLoop(url, periodMs){
   this._timer = null;      // setTimeout for next cycle
 }
 
-// Detach an Audio element — unhook callbacks, drop reference, let it
-// finish playing naturally and get garbage-collected.
+// Detach an Audio element — unhook callbacks, let it finish its last
+// few ms of playback, then return to pool after a delay.
 SoundLoop.prototype._detach = function(el){
   if(!el) return;
   try{ el.onended = null; }catch(e){}
   try{ el.onerror = null; }catch(e){}
+  setTimeout(function(){ releaseAudio(el); }, 2000);
 };
 
-// Hard-stop an Audio element — pause, clear src, free resources.
+// Hard-stop an Audio element and return it to pool immediately.
 // Used only by .stop() for immediate silence.
 SoundLoop.prototype._kill = function(el){
   if(!el) return;
-  try{ el.onended = null; }catch(e){}
-  try{ el.onerror = null; }catch(e){}
-  try{ el.pause(); }catch(e){}
-  try{ el.src = ''; }catch(e){}
+  releaseAudio(el);
 };
 
 // Pre-create the next Audio element so it decodes in the background.
@@ -549,7 +577,8 @@ SoundLoop.prototype._kill = function(el){
 SoundLoop.prototype._prepareNext = function(){
   if(!this._running || this._next) return;
   try{
-    var el = new Audio(this._url);
+    var el = obtainAudio();
+    el.src = this._url;
     el.preload = 'auto';
     el.volume = 1.0;
     this._next = el;
@@ -576,7 +605,7 @@ SoundLoop.prototype._cycle = function(){
   var el = this._next;
   this._next = null;
   if(!el){
-    try{ el = new Audio(this._url); }catch(e){}
+    try{ el = obtainAudio(); el.src = this._url; }catch(e){}
   }
   if(!el){
     // Element creation failed — retry next cycle
@@ -671,15 +700,16 @@ function updateSoundState(data){
 
   var target;
   try{
-    var alarmFields = [
+    var _nonEmpty = function(f){ return typeof f === 'string' && f.length > 0; };
+    var jerusalemActive = alarmJerusalemEnabled && [
       data.jerusalem_attack_warning,
-      data.jerusalem_actual_red_alerts,
+      data.jerusalem_actual_red_alerts
+    ].some(_nonEmpty);
+    var centerActive = alarmCenterEnabled && [
       data.center_dan_or_yehuda_or_jerusalem_danger,
       data.confirmed_center_attack_not_just_north_south
-    ];
-    var shouldAlarm = alarmFields.some(function(f){
-      return typeof f === 'string' && f.length > 0;
-    });
+    ].some(_nonEmpty);
+    var shouldAlarm = jerusalemActive || centerActive;
     if(shouldAlarm){
       target = 'alarm';
     }else if(data.any_threat === true && tickEnabled){
@@ -719,7 +749,34 @@ function updateSoundState(data){
 
 window.unlock = function(){
   console.log('[UNLOCK] User tapped Enable Alerts (tick=' + tickEnabled + ')');
+  // Kill any active test so testMode doesn't block real events
+  if(testMode){
+    stopAlarm();
+    stopTick();
+    testMode = false;
+    testWhich = null;
+    soundState = 'silent';
+  }
   audioUnlocked = true;
+
+  // Fill the audio element pool inside this user gesture. iOS WebKit
+  // requires each HTML5 Audio object to be CREATED during a gesture
+  // handler — objects created later (XHR, setTimeout) silently fail.
+  // Pre-creating a pool here lets SoundLoop draw unlocked elements
+  // at any time. Also play one element to fully activate the session.
+  if(!_audioPool.length){
+    for(var i = 0; i < _POOL_SIZE; i++){
+      try{ _audioPool.push(new Audio()); }catch(e){ break; }
+    }
+    console.log('[POOL] Created ' + _audioPool.length + ' Audio elements');
+  }
+  try{
+    var u = new Audio('/silence.mp3');
+    var p = u.play();
+    if(p && typeof p.then === 'function') p.then(function(){ try{ u.pause(); u.src=''; }catch(e){} });
+    if(p && typeof p.catch === 'function') p.catch(function(){});
+  }catch(e){}
+
   try{
     document.getElementById('welcome').classList.add('hidden');
   }catch(e){}
@@ -729,11 +786,14 @@ window.unlock = function(){
 window.toggleTick = function(){
   tickEnabled = !tickEnabled;
   console.log('[TICK] Toggle: ' + (tickEnabled ? 'ON' : 'OFF'));
+  // Sync welcome screen checkbox
   var box = document.getElementById('tick-check');
   if(box){
     box.style.background = tickEnabled ? 'var(--yellow)' : 'transparent';
     box.querySelector('svg').style.opacity = tickEnabled ? '1' : '0';
   }
+  // Sync panel mute button
+  updateMuteBtn('tick', tickEnabled, true);
   // If tick is currently playing and user disabled it, stop immediately
   if(!tickEnabled && soundState === 'tick'){
     stopTick();
@@ -743,6 +803,30 @@ window.toggleTick = function(){
   if(tickEnabled && audioUnlocked && !testMode && lastData){
     updateSoundState(lastData);
   }
+};
+
+window.toggleAlarmJerusalem = function(){
+  alarmJerusalemEnabled = !alarmJerusalemEnabled;
+  console.log('[ALARM] Jerusalem toggle: ' + (alarmJerusalemEnabled ? 'ON' : 'OFF'));
+  updateMuteBtn('alarmJerusalem', alarmJerusalemEnabled, false);
+  if(audioUnlocked && !testMode && lastData){
+    updateSoundState(lastData);
+  }
+};
+
+window.toggleAlarmCenter = function(){
+  alarmCenterEnabled = !alarmCenterEnabled;
+  console.log('[ALARM] Center toggle: ' + (alarmCenterEnabled ? 'ON' : 'OFF'));
+  updateMuteBtn('alarmCenter', alarmCenterEnabled, false);
+  if(audioUnlocked && !testMode && lastData){
+    updateSoundState(lastData);
+  }
+};
+
+window.toggleMute = function(muteId){
+  if(muteId === 'tick') window.toggleTick();
+  else if(muteId === 'alarmJerusalem') window.toggleAlarmJerusalem();
+  else if(muteId === 'alarmCenter') window.toggleAlarmCenter();
 };
 
 // ================================================================
@@ -1036,14 +1120,14 @@ function updateChannelsFreshness(){
 // ================================================================
 
 var THREAT_ROWS = [
-  {group:'All of Israel'},
+  {group:'All of Israel', muteType:'tick', muteId:'tick'},
   ['israel_attack_warning','Attack warning'],
   ['israel_actual_red_alerts','Red alerts active'],
   ['attack_involves_missiles_not_just_uavs','Missiles (not just UAVs)'],
-  {group:'Jerusalem'},
+  {group:'Jerusalem', muteType:'alarm', muteId:'alarmJerusalem'},
   ['jerusalem_attack_warning','Attack warning'],
   ['jerusalem_actual_red_alerts','Red alerts active'],
-  {group:'Center / Dan / Yehuda / Jerusalem'},
+  {group:'Center / Dan / Yehuda / Jerusalem', muteType:'alarm', muteId:'alarmCenter'},
   ['center_dan_or_yehuda_or_jerusalem_danger','Imminent danger'],
   ['confirmed_center_attack_not_just_north_south','Confirmed center/Jerusalem attack (not just N/S)']
 ];
@@ -1056,6 +1140,20 @@ function esc(s){
   }catch(e){
     return '';
   }
+}
+
+// SVG icons for mute buttons (12x12)
+var ICON_SPEAKER = '<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" style="vertical-align:middle"><path d="M3 5h2l4-3v12l-4-3H3c-.6 0-1-.4-1-1V6c0-.6.4-1 1-1z"/><path d="M12 5c1 1 1.5 2.2 1.5 3.5S13 11 12 12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" fill="none"/></svg>';
+var ICON_SPEAKER_OFF = '<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" style="vertical-align:middle"><path d="M3 5h2l4-3v12l-4-3H3c-.6 0-1-.4-1-1V6c0-.6.4-1 1-1z" opacity=".5"/><line x1="2" y1="14" x2="14" y2="2" stroke="currentColor" stroke-width="2"/></svg>';
+var ICON_BELL = '<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" style="vertical-align:middle"><path d="M8 1a1 1 0 011 1v.3A4.5 4.5 0 0112.5 7v3l1 1.5H2.5L3.5 10V7A4.5 4.5 0 017 2.3V2a1 1 0 011-1z"/><path d="M6.5 13a1.5 1.5 0 003 0"/></svg>';
+var ICON_BELL_OFF = '<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" style="vertical-align:middle"><path d="M8 1a1 1 0 011 1v.3A4.5 4.5 0 0112.5 7v3l1 1.5H2.5L3.5 10V7A4.5 4.5 0 017 2.3V2a1 1 0 011-1z" opacity=".5"/><path d="M6.5 13a1.5 1.5 0 003 0" opacity=".5"/><line x1="2" y1="14" x2="14" y2="2" stroke="currentColor" stroke-width="2"/></svg>';
+
+function updateMuteBtn(muteId, enabled, isTick){
+  var btn = document.getElementById('mute-' + muteId);
+  if(!btn) return;
+  btn.className = 'group-mute-btn ' + (isTick ? 'tick-btn' : 'alarm-btn') + (enabled ? '' : ' muted');
+  var icon = isTick ? (enabled ? ICON_SPEAKER : ICON_SPEAKER_OFF) : (enabled ? ICON_BELL : ICON_BELL_OFF);
+  btn.innerHTML = icon + ' ' + (isTick ? 'TICK' : 'ALARM');
 }
 
 function renderThreat(d){
@@ -1075,7 +1173,16 @@ function renderThreat(d){
     for(var i = 0; i < THREAT_ROWS.length; i++){
       var row = THREAT_ROWS[i];
       if(row.group){
-        html += '<div class="bool-group-header">' + esc(row.group) + '</div>';
+        var btnHtml = '';
+        if(row.muteId){
+          var isTick = row.muteType === 'tick';
+          var enabled = isTick ? tickEnabled : (row.muteId === 'alarmJerusalem' ? alarmJerusalemEnabled : alarmCenterEnabled);
+          var btnCls = 'group-mute-btn ' + (isTick ? 'tick-btn' : 'alarm-btn') + (enabled ? '' : ' muted');
+          var icon = isTick ? (enabled ? ICON_SPEAKER : ICON_SPEAKER_OFF) : (enabled ? ICON_BELL : ICON_BELL_OFF);
+          var lbl = isTick ? 'TICK' : 'ALARM';
+          btnHtml = '<button class="' + btnCls + '" id="mute-' + row.muteId + '" onclick="toggleMute(\'' + row.muteId + '\')">' + icon + ' ' + lbl + '</button>';
+        }
+        html += '<div class="bool-group-header"><span>' + esc(row.group) + '</span>' + btnHtml + '</div>';
         continue;
       }
       var key = row[0], label = row[1];
