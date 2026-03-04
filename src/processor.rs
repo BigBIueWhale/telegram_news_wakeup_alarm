@@ -125,24 +125,6 @@ pub async fn run_loop(
             total_msgs
         );
 
-        // Update channel buffer info in web state on every snapshot.
-        {
-            let mut channels: Vec<WebChannelInfo> = snapshot
-                .iter()
-                .map(|s| WebChannelInfo {
-                    name: s.channel_title.clone(),
-                    message_count: s.messages.len(),
-                    latest_message: s
-                        .messages
-                        .last()
-                        .map(|m| m.date.to_rfc3339())
-                        .unwrap_or_default(),
-                })
-                .collect();
-            channels.sort_by(|a, b| b.latest_message.cmp(&a.latest_message));
-            web_state.write().expect("web state lock poisoned").channels = channels;
-        }
-
         // Wait if no messages have arrived yet.
         if snapshot.is_empty() {
             log::info!("[processor] No messages yet — waiting 5s...");
@@ -226,13 +208,32 @@ pub async fn run_loop(
         let step_start = Instant::now();
 
         match build_budgeted_prompt(&snapshot, &tokenizer) {
-            Ok((prompt, window_minutes, token_count)) => {
+            Ok((prompt, window_minutes, token_count, channel_counts)) => {
                 log::info!(
                     "[processor] Prompt built ({}): {}min window, ~{} tokens",
                     format_duration(step_start.elapsed()),
                     window_minutes,
                     token_count,
                 );
+
+                // Update GUI with per-channel message counts from the actual LLM window.
+                {
+                    let mut channels: Vec<WebChannelInfo> = channel_counts
+                        .iter()
+                        .map(|(name, count)| WebChannelInfo {
+                            name: name.clone(),
+                            message_count: *count,
+                            latest_message: snapshot
+                                .iter()
+                                .find(|s| &s.channel_title == name)
+                                .and_then(|s| s.messages.last())
+                                .map(|m| m.date.to_rfc3339())
+                                .unwrap_or_default(),
+                        })
+                        .collect();
+                    channels.sort_by(|a, b| b.latest_message.cmp(&a.latest_message));
+                    web_state.write().expect("web state lock poisoned").channels = channels;
+                }
 
                 // Step 3: Query LLM
                 log::info!(
@@ -360,6 +361,16 @@ fn windowed_message_count(
     channel_msgs: &[(&ChannelSnapshot, Vec<&ChannelMessage>)],
 ) -> usize {
     channel_msgs.iter().map(|(_, msgs)| msgs.len()).sum()
+}
+
+/// Extract per-channel (name, message_count) pairs from the windowed messages.
+fn extract_channel_counts(
+    channel_msgs: &[(&ChannelSnapshot, Vec<&ChannelMessage>)],
+) -> Vec<(String, usize)> {
+    channel_msgs
+        .iter()
+        .map(|(snap, msgs)| (snap.channel_title.clone(), msgs.len()))
+        .collect()
 }
 
 // ── Prompt construction ──
@@ -509,11 +520,11 @@ Rules:
 ///      to find the precise optimal fit.
 ///   5. The time window is uniform across all channels — same cutoff for everyone.
 ///
-/// Returns: (prompt_string, window_in_minutes, token_count)
+/// Returns: (prompt_string, window_in_minutes, token_count, per_channel_counts)
 fn build_budgeted_prompt(
     snapshots: &[ChannelSnapshot],
     tokenizer: &Tokenizer,
-) -> Result<(String, u64, usize)> {
+) -> Result<(String, u64, usize, Vec<(String, usize)>)> {
     let newest = find_newest_message_time(snapshots)
         .context("no messages found in any channel buffer — nothing to analyze")?;
 
@@ -521,7 +532,7 @@ fn build_budgeted_prompt(
 
     // Phase 1: Exponential expansion to find the range boundaries.
     let mut window_minutes: u64 = FOCUS_MINUTES as u64;
-    let mut last_good: Option<(String, u64, usize)> = None;
+    let mut last_good: Option<(String, u64, usize, Vec<(String, usize)>)> = None;
 
     loop {
         let window = ChronoDuration::minutes(window_minutes as i64);
@@ -545,7 +556,8 @@ fn build_budgeted_prompt(
         }
 
         // Under budget. Save this as the best known good result.
-        last_good = Some((prompt, window_minutes, tokens));
+        let counts = extract_channel_counts(&channel_msgs);
+        last_good = Some((prompt, window_minutes, tokens, counts));
 
         // Check if we've included every message across all channels.
         let included = windowed_message_count(&channel_msgs);
@@ -563,11 +575,11 @@ fn build_budgeted_prompt(
     }
 
     // Phase 2: Binary search refinement.
-    if let Some((good_prompt, good_minutes, good_tokens)) = last_good {
+    if let Some((good_prompt, good_minutes, good_tokens, good_counts)) = last_good {
         let high = window_minutes; // This window was over budget (or hit the ceiling).
         match binary_search_window(snapshots, tokenizer, newest, good_minutes, high) {
             Some(refined) => Ok(refined),
-            None => Ok((good_prompt, good_minutes, good_tokens)),
+            None => Ok((good_prompt, good_minutes, good_tokens, good_counts)),
         }
     } else {
         // Even the smallest window (FOCUS_MINUTES) exceeded the budget.
@@ -585,7 +597,8 @@ fn build_budgeted_prompt(
                 let channel_msgs = messages_in_window(snapshots, newest, window);
                 let prompt = build_prompt_text(&channel_msgs, newest, FOCUS_MINUTES);
                 let tokens = count_tokens(tokenizer, &prompt);
-                Ok((prompt, 1, tokens))
+                let counts = extract_channel_counts(&channel_msgs);
+                Ok((prompt, 1, tokens, counts))
             }
         }
     }
@@ -599,10 +612,10 @@ fn binary_search_window(
     newest: DateTime<Utc>,
     low_minutes: u64,
     high_minutes: u64,
-) -> Option<(String, u64, usize)> {
+) -> Option<(String, u64, usize, Vec<(String, usize)>)> {
     let mut low = low_minutes;
     let mut high = high_minutes;
-    let mut best: Option<(String, u64, usize)> = None;
+    let mut best: Option<(String, u64, usize, Vec<(String, usize)>)> = None;
 
     // Refine until precision is within 1 minute.
     while high.saturating_sub(low) > 1 {
@@ -619,7 +632,8 @@ fn binary_search_window(
         let tokens = count_tokens(tokenizer, &prompt);
 
         if tokens < MAX_TOKENS {
-            best = Some((prompt, mid, tokens));
+            let counts = extract_channel_counts(&channel_msgs);
+            best = Some((prompt, mid, tokens, counts));
             low = mid;
         } else {
             high = mid;

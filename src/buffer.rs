@@ -107,4 +107,12 @@ impl ChannelBuffers {
             .map(|buf| buf.len())
             .sum()
     }
+
+    /// Returns `true` if a buffer exists for the given channel ID.
+    pub fn has_channel(&self, channel_id: i64) -> bool {
+        self.inner
+            .read()
+            .expect("channel buffer RwLock poisoned")
+            .contains_key(&channel_id)
+    }
 }

@@ -133,6 +133,10 @@ pub async fn run_listener(config: &Config, buffers: &ChannelBuffers, ready: Opti
     log::info!("Loading historical messages (up to 512 per channel)...");
     let mut total_history_msgs: usize = 0;
     for (peer_ref, title, channel_id) in &channels {
+        if buffers.has_channel(*channel_id) {
+            log::info!("  {} — skipping backfill (buffer already has data)", title);
+            continue;
+        }
         let mut iter = client.iter_messages(*peer_ref).limit(512);
         let mut batch: Vec<ChannelMessage> = Vec::new();
         while let Some(msg) = iter
