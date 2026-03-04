@@ -12,7 +12,7 @@ use tokenizers::Tokenizer;
 use tokio_util::sync::CancellationToken;
 
 /// Maximum token budget for the LLM prompt (must stay strictly LESS than this).
-const MAX_TOKENS: usize = 18_000;
+const MAX_TOKENS: usize = 50_000;
 
 /// The LLM is instructed to focus analysis on this many minutes of recent activity.
 /// Context older than this is provided only for background understanding.
