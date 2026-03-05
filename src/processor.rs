@@ -21,6 +21,68 @@ const FOCUS_MINUTES: i64 = 15;
 /// Don't bother querying the LLM if there are fewer messages than this.
 const MIN_MESSAGES_TO_PROCESS: usize = 1;
 
+/// Max tokens for the freeform skepticism turn (turn 2). Enough for the model
+/// to analyze its mistakes without wasting GPU time on a 32k-token essay.
+const VERIFICATION_TURN2_MAX_TOKENS: u64 = 4096;
+
+/// Max tokens for the final corrected threat-only JSON (turn 3). Much smaller
+/// than turn 1 because it only contains the 7 threat fields, not the news array.
+const VERIFICATION_TURN3_MAX_TOKENS: u64 = 1024;
+
+/// Turn 2: Skepticism follow-up. Static prompt — no structured answer expected,
+/// the model just thinks out loud about common mistakes.
+const SKEPTICISM_PROMPT: &str = "\
+Wait. Before I use this, I want to make sure you didn't fall into any of these common mistakes. \
+Don't give me JSON — just think out loud and be honest:\n\
+\n\
+1. Did you confuse OLD messages with what's happening NOW? The message history goes back a long \
+time. An alarming report from an hour ago does NOT mean there's a current threat — especially if \
+later messages say the event ended. Did you check the LATEST status of every event before deciding?\n\
+\n\
+2. Did you confuse Israeli OFFENSIVE operations (Israel attacking someone else) with INCOMING \
+threats to Israel? Reports about Israeli airstrikes in Lebanon or Syria do NOT mean Israel is \
+under attack.\n\
+\n\
+3. Did you set jerusalem/center fields to active because of an attack that only targets the north \
+or south? Hezbollah rockets hitting Haifa do NOT threaten Jerusalem. Gaza rockets hitting Sderot \
+do NOT threaten Jerusalem. Only Iranian ballistic missiles to center/Gush Dan/Yehuda warrant the \
+Jerusalem alarm.\n\
+\n\
+4. Did you set attack_involves_missiles to active for a UAV/drone-only event? UAVs are routine \
+and do NOT warrant waking someone up — only missiles, rockets, or ballistic projectiles do.\n\
+\n\
+5. Did you set any field to active just because the language in the messages SOUNDS scary or \
+urgent? Dramatic reporting is not the same as a current threat. What matters is: is something \
+ACTUALLY flying toward the relevant area RIGHT NOW?\n\
+\n\
+6. Did a message say the event is over, threat ended, or safe to exit — but you kept fields \
+active anyway? Once an event concludes, ALL related fields must immediately go to active=false.\n\
+\n\
+Think through what you just output and whether any of these mistakes apply. Be honest — I'd \
+rather you correct yourself now than trigger a false alarm.";
+
+/// Turn 3: Final corrected threat-only output request.
+/// Only asks for the 7 threat fields — the news `updates` array was already
+/// validated in turn 1 and doesn't need to be regenerated.
+const FINAL_OUTPUT_PROMPT: &str = "\
+Based on your analysis above, provide your FINAL corrected threat assessment. If you found errors \
+in your initial response, fix them now. If your initial assessment was correct, keep it as-is.\n\
+\n\
+Remember: active=true means \"this threat is real and happening RIGHT NOW — wake this person up.\" \
+active=false means \"no current threat for this field.\"\n\
+\n\
+Respond with ONLY a JSON object containing the 7 threat fields. Do NOT include the \"updates\" \
+array — I already have that from your first response. Just the threat booleans and reasons:\n\
+\n\
+{\"israel_attack_warning\":{\"active\":false,\"reason\":\"...\"},\"israel_actual_red_alerts\":\
+{\"active\":false,\"reason\":\"...\"},\"attack_involves_missiles_not_just_uavs\":{\"active\":false,\
+\"reason\":\"...\"},\"jerusalem_attack_warning\":{\"active\":false,\"reason\":\"...\"},\
+\"jerusalem_actual_red_alerts\":{\"active\":false,\"reason\":\"...\"},\
+\"center_dan_or_yehuda_or_jerusalem_danger\":{\"active\":false,\"reason\":\"...\"},\
+\"confirmed_center_attack_not_just_north_south\":{\"active\":false,\"reason\":\"...\"}}\n\
+\n\
+No explanation, no preamble, no postamble — only valid JSON with the 7 fields above.";
+
 // ── LLM output types (for JSON parsing validation) ──
 
 /// A single threat field from the LLM: boolean + reason string.
@@ -49,23 +111,43 @@ impl ThreatField {
     }
 }
 
+/// Turn 1 output: full LLM response including news AND threat fields.
+/// Only `updates` is read from this struct — threat values come from turn 3's
+/// `ThreatOnlyOutput`. But the threat fields MUST remain here so serde validates
+/// the complete turn 1 JSON structure: we don't let the model get away with
+/// omitting or malforming any field, even if we don't use its initial values.
 #[derive(Deserialize, Debug)]
+#[allow(dead_code)] // Fields deserialized for validation, values used from turn 3.
 struct NewsOutput {
     updates: Vec<NewsItem>,
-    // Threat assessment fields — the whole point of this alarm system.
-    // Each field has { active: bool, reason: String }.
-    // active=true means threat detected (reason explains why).
-    // active=false means no threat (reason explains why not — keeps model balanced).
-    //
-    // Group 1: Israel-wide (informational — don't trigger alarm alone)
+    // Threat assessment fields — deserialized to enforce format compliance.
+    // active/reason values come from turn 3 (ThreatOnlyOutput) instead.
     #[serde(default)]
     israel_attack_warning: ThreatField,
     #[serde(default)]
     israel_actual_red_alerts: ThreatField,
     #[serde(default)]
     attack_involves_missiles_not_just_uavs: ThreatField,
-    //
-    // Group 2: Center / Jerusalem (these trigger alarm)
+    #[serde(default)]
+    jerusalem_attack_warning: ThreatField,
+    #[serde(default)]
+    jerusalem_actual_red_alerts: ThreatField,
+    #[serde(default)]
+    center_dan_or_yehuda_or_jerusalem_danger: ThreatField,
+    #[serde(default)]
+    confirmed_center_attack_not_just_north_south: ThreatField,
+}
+
+/// Turn 3 output: only the 7 threat fields (no news `updates` array).
+/// The news was already validated from turn 1 — turn 3 only corrects threats.
+#[derive(Deserialize, Debug)]
+struct ThreatOnlyOutput {
+    #[serde(default)]
+    israel_attack_warning: ThreatField,
+    #[serde(default)]
+    israel_actual_red_alerts: ThreatField,
+    #[serde(default)]
+    attack_involves_missiles_not_just_uavs: ThreatField,
     #[serde(default)]
     jerusalem_attack_warning: ThreatField,
     #[serde(default)]
@@ -262,15 +344,15 @@ pub async fn run_loop(
                     web_state.write().expect("web state lock poisoned").channels = channels;
                 }
 
-                // Step 3: Query LLM
+                // Step 3: Query LLM with 3-turn verification
                 log::info!(
-                    "[processor] Querying Ollama ('{}')...",
+                    "[processor] Querying Ollama ('{}') with 3-turn verification...",
                     ollama.model_name()
                 );
                 let step_start = Instant::now();
 
                 let query_result = tokio::select! {
-                    result = ollama.query(&prompt) => Some(result),
+                    result = query_with_verification(&ollama, &prompt) => Some(result),
                     _ = shutdown.cancelled() => None,
                 };
 
@@ -279,18 +361,18 @@ pub async fn run_loop(
                         log::info!("[processor] Shutdown signal received during LLM query — exiting");
                         return Ok(());
                     }
-                    Some(Ok(response)) => {
+                    Some(Ok((news, threats))) => {
                         log::info!(
-                            "[processor] LLM response received ({})",
+                            "[processor] Verified LLM response received ({})",
                             format_duration(step_start.elapsed())
                         );
                         consecutive_errors = 0;
                         last_processed_newest = current_newest;
 
-                        // Step 4: Parse and display output
-                        log::info!("[processor] Parsing LLM response...");
+                        // Step 4: Display output — news from turn 1, threats from turn 3.
+                        log::info!("[processor] Processing verified output...");
                         let step_start = Instant::now();
-                        process_and_print_output(&response, &web_state, &snapshot_time);
+                        display_verified_output(&news, &threats, &web_state, &snapshot_time);
                         log::info!(
                             "[processor] Output processed ({})",
                             format_duration(step_start.elapsed())
@@ -691,6 +773,107 @@ fn binary_search_window(
     best
 }
 
+// ── Multi-turn verification ──
+
+/// Run a 3-turn conversation with the LLM to reduce false positive threat alarms.
+///
+/// Turn 1: Initial structured JSON assessment (news + threats). Parsed for format
+///          validation — the `updates` (news) array is kept, but threat values are NOT used.
+/// Turn 2: Hard-coded skepticism prompt challenges common mistakes. The model responds
+///          freeform (no JSON expected). This forces it to re-examine its reasoning.
+/// Turn 3: Ask for only the 7 corrected threat fields (no news — already have it from turn 1).
+///
+/// Returns `(turn1_news, turn3_threats)` — the caller merges news from turn 1 with
+/// the verified threat assessment from turn 3.
+///
+/// Ollama reuses the KV cache prefix across turns, so turns 2-3 only process
+/// the incremental tokens — not the full 50k-token prompt again.
+async fn query_with_verification(
+    ollama: &OllamaClient,
+    prompt: &str,
+) -> Result<(NewsOutput, ThreatOnlyOutput)> {
+    let total_start = Instant::now();
+
+    // ── Turn 1: Initial assessment ──
+    log::info!("[verify] Turn 1: Initial assessment...");
+    let t1_start = Instant::now();
+    let turn1_response = ollama.query(prompt).await
+        .context("Turn 1 (initial assessment) failed")?;
+    log::info!(
+        "[verify] Turn 1: Response received ({})",
+        format_duration(t1_start.elapsed())
+    );
+
+    // Validate turn 1 format — reject garbage early, don't waste 2 more turns on it.
+    // Keep the parsed NewsOutput for its `updates` array (news items).
+    let cleaned1 = strip_think_blocks(&turn1_response);
+    let json1 = extract_json(&cleaned1);
+    let turn1_parsed: NewsOutput = serde_json::from_str(json1)
+        .with_context(|| format!(
+            "Turn 1 response was not valid JSON — aborting verification. \
+             First 500 chars: '{}'",
+            &cleaned1[..500.min(cleaned1.len())]
+        ))?;
+    log::info!("[verify] Turn 1: Format validation passed");
+
+    // ── Turn 2: Skepticism follow-up ──
+    log::info!(
+        "[verify] Turn 2: Skepticism follow-up ({} tok limit)...",
+        VERIFICATION_TURN2_MAX_TOKENS
+    );
+    let t2_start = Instant::now();
+    let turn2_response = ollama.query_conversation(
+        &[
+            ("user", prompt),
+            ("assistant", &turn1_response),
+            ("user", SKEPTICISM_PROMPT),
+        ],
+        VERIFICATION_TURN2_MAX_TOKENS,
+    ).await
+        .context("Turn 2 (skepticism follow-up) failed")?;
+    log::info!(
+        "[verify] Turn 2: Response received ({}, {} chars)",
+        format_duration(t2_start.elapsed()),
+        turn2_response.len()
+    );
+
+    // ── Turn 3: Final corrected threat-only output ──
+    log::info!("[verify] Turn 3: Final corrected threats (no news)...");
+    let t3_start = Instant::now();
+    let turn3_response = ollama.query_conversation(
+        &[
+            ("user", prompt),
+            ("assistant", &turn1_response),
+            ("user", SKEPTICISM_PROMPT),
+            ("assistant", &turn2_response),
+            ("user", FINAL_OUTPUT_PROMPT),
+        ],
+        VERIFICATION_TURN3_MAX_TOKENS,
+    ).await
+        .context("Turn 3 (final corrected threats) failed")?;
+    log::info!(
+        "[verify] Turn 3: Response received ({})",
+        format_duration(t3_start.elapsed())
+    );
+
+    log::info!(
+        "[verify] Total verification: {} (3 turns)",
+        format_duration(total_start.elapsed())
+    );
+
+    // Parse turn 3 as threat-only output.
+    let cleaned3 = strip_think_blocks(&turn3_response);
+    let json3 = extract_json(&cleaned3);
+    let turn3_parsed: ThreatOnlyOutput = serde_json::from_str(json3)
+        .with_context(|| format!(
+            "Turn 3 response was not valid threat JSON — \
+             First 500 chars: '{}'",
+            &cleaned3[..500.min(cleaned3.len())]
+        ))?;
+
+    Ok((turn1_parsed, turn3_parsed))
+}
+
 // ── ANSI color constants ──
 
 const RESET: &str = "\x1b[0m";
@@ -729,112 +912,95 @@ fn importance_color(importance: &str) -> &'static str {
 
 // ── Output processing ──
 
-/// Parse the LLM response as JSON, print a human-readable summary to stdout,
-/// and update the shared web state for the dashboard.
-fn process_and_print_output(raw_response: &str, web_state: &SharedWebState, data_collected_at: &str) {
-    let cleaned = strip_think_blocks(raw_response);
-    let json_str = extract_json(&cleaned);
+/// Display the verified output: news items from turn 1, threat assessment from turn 3.
+/// Updates the shared web state for the dashboard.
+fn display_verified_output(
+    news: &NewsOutput,
+    threats: &ThreatOnlyOutput,
+    web_state: &SharedWebState,
+    data_collected_at: &str,
+) {
+    // any_threat drives ticking sound + red background.
+    // Israel-wide fields alone don't trigger it — north/south UAVs aren't
+    // worth waking up for. Only center fields OR missiles trigger alarm.
+    let any_threat = threats.attack_involves_missiles_not_just_uavs.active
+        || threats.jerusalem_attack_warning.active
+        || threats.jerusalem_actual_red_alerts.active
+        || threats.center_dan_or_yehuda_or_jerusalem_danger.active
+        || threats.confirmed_center_attack_not_just_north_south.active;
 
-    match serde_json::from_str::<NewsOutput>(json_str) {
-        Ok(output) => {
-            // any_threat drives ticking sound + red background.
-            // Israel-wide fields alone don't trigger it — north/south UAVs aren't
-            // worth waking up for. Only center fields OR missiles trigger alarm.
-            let any_threat = output.attack_involves_missiles_not_just_uavs.active
-                || output.jerusalem_attack_warning.active
-                || output.jerusalem_actual_red_alerts.active
-                || output.center_dan_or_yehuda_or_jerusalem_danger.active
-                || output.confirmed_center_attack_not_just_north_south.active;
+    let now = Utc::now().with_timezone(&TZ_JERUSALEM).format("%H:%M:%S");
 
-            let now = Utc::now().with_timezone(&TZ_JERUSALEM).format("%H:%M:%S");
+    // ── Threat assessment panel (always shown) ──
+    println!();
+    if any_threat {
+        println!("{BOLD}{BG_RED}{WHITE}                                                            {RESET}");
+        println!("{BOLD}{BG_RED}{WHITE}          !! THREAT ALERT — WAKE UP !!                      {RESET}");
+        println!("{BOLD}{BG_RED}{WHITE}                                                            {RESET}");
+    } else {
+        println!("{DIM}───────────────────────────────────────────────{RESET}");
+        println!("  {BOLD}{BRIGHT_GREEN}ALL CLEAR{RESET}  {DIM}[{now}]{RESET}");
+        println!("{DIM}───────────────────────────────────────────────{RESET}");
+    }
+    println!();
+    println!("  {BOLD}{MAGENTA}Threat Assessment{RESET}");
+    println!("  {DIM}── All of Israel ──────────────────────{RESET}");
+    println!("{}", fmt_threat("Attack warning", threats.israel_attack_warning.display_reason()));
+    println!("{}", fmt_threat("Red alerts active", threats.israel_actual_red_alerts.display_reason()));
+    println!("{}", fmt_threat("Missiles (not just UAVs)", threats.attack_involves_missiles_not_just_uavs.display_reason()));
+    println!("  {DIM}── Jerusalem ──────────────────────────{RESET}");
+    println!("{}", fmt_threat("Attack warning", threats.jerusalem_attack_warning.display_reason()));
+    println!("{}", fmt_threat("Red alerts active", threats.jerusalem_actual_red_alerts.display_reason()));
+    println!("  {DIM}── Center / Dan / Yehuda / Jerusalem ─{RESET}");
+    println!("{}", fmt_threat("Imminent danger", threats.center_dan_or_yehuda_or_jerusalem_danger.display_reason()));
+    println!("{}", fmt_threat("Confirmed center/Jerusalem attack (not just N/S)", threats.confirmed_center_attack_not_just_north_south.display_reason()));
+    println!("  {DIM}─────────────────────────────────────────{RESET}");
+    println!();
 
-            // ── Threat assessment panel (always shown) ──
+    // ── News items (from turn 1) ──
+    if news.updates.is_empty() {
+        println!("  {DIM}No notable updates in the last {FOCUS_MINUTES} minutes{RESET}");
+        println!();
+    } else {
+        println!("  {BOLD}{BLUE}News Updates{RESET}  {DIM}({} items — last {FOCUS_MINUTES} min){RESET}", news.updates.len());
+        println!();
+        for item in &news.updates {
+            let color = importance_color(&item.importance);
+            let tag = item.importance.to_uppercase();
+            let time_info = match (item.time_of_report.is_empty(), item.time_of_event.is_empty()) {
+                (false, false) => format!(" {DIM}reported {} / event {}{RESET}", item.time_of_report, item.time_of_event),
+                (false, true) => format!(" {DIM}reported {}{RESET}", item.time_of_report),
+                _ => String::new(),
+            };
+            println!("  {BOLD}{color}[{tag}]{RESET}  {BOLD}{}{RESET}{time_info}", item.headline);
+            println!("         {DIM}{YELLOW}{}{RESET}", item.channel);
+            println!("         {}", item.summary);
             println!();
-            if any_threat {
-                println!("{BOLD}{BG_RED}{WHITE}                                                            {RESET}");
-                println!("{BOLD}{BG_RED}{WHITE}          !! THREAT ALERT — WAKE UP !!                      {RESET}");
-                println!("{BOLD}{BG_RED}{WHITE}                                                            {RESET}");
-            } else {
-                println!("{DIM}───────────────────────────────────────────────{RESET}");
-                println!("  {BOLD}{BRIGHT_GREEN}ALL CLEAR{RESET}  {DIM}[{now}]{RESET}");
-                println!("{DIM}───────────────────────────────────────────────{RESET}");
-            }
-            println!();
-            println!("  {BOLD}{MAGENTA}Threat Assessment{RESET}");
-            println!("  {DIM}── All of Israel ──────────────────────{RESET}");
-            println!("{}", fmt_threat("Attack warning", output.israel_attack_warning.display_reason()));
-            println!("{}", fmt_threat("Red alerts active", output.israel_actual_red_alerts.display_reason()));
-            println!("{}", fmt_threat("Missiles (not just UAVs)", output.attack_involves_missiles_not_just_uavs.display_reason()));
-            println!("  {DIM}── Jerusalem ──────────────────────────{RESET}");
-            println!("{}", fmt_threat("Attack warning", output.jerusalem_attack_warning.display_reason()));
-            println!("{}", fmt_threat("Red alerts active", output.jerusalem_actual_red_alerts.display_reason()));
-            println!("  {DIM}── Center / Dan / Yehuda / Jerusalem ─{RESET}");
-            println!("{}", fmt_threat("Imminent danger", output.center_dan_or_yehuda_or_jerusalem_danger.display_reason()));
-            println!("{}", fmt_threat("Confirmed center/Jerusalem attack (not just N/S)", output.confirmed_center_attack_not_just_north_south.display_reason()));
-            println!("  {DIM}─────────────────────────────────────────{RESET}");
-            println!();
-
-            // ── News items ──
-            if output.updates.is_empty() {
-                println!("  {DIM}No notable updates in the last {FOCUS_MINUTES} minutes{RESET}");
-                println!();
-            } else {
-                println!("  {BOLD}{BLUE}News Updates{RESET}  {DIM}({} items — last {FOCUS_MINUTES} min){RESET}", output.updates.len());
-                println!();
-                for item in &output.updates {
-                    let color = importance_color(&item.importance);
-                    let tag = item.importance.to_uppercase();
-                    let time_info = match (item.time_of_report.is_empty(), item.time_of_event.is_empty()) {
-                        (false, false) => format!(" {DIM}reported {} / event {}{RESET}", item.time_of_report, item.time_of_event),
-                        (false, true) => format!(" {DIM}reported {}{RESET}", item.time_of_report),
-                        _ => String::new(),
-                    };
-                    println!("  {BOLD}{color}[{tag}]{RESET}  {BOLD}{}{RESET}{time_info}", item.headline);
-                    println!("         {DIM}{YELLOW}{}{RESET}", item.channel);
-                    println!("         {}", item.summary);
-                    println!();
-                }
-            }
-
-            // Update shared web state for the dashboard.
-            {
-                let mut ws = web_state.write().expect("web state lock poisoned");
-                ws.version += 1;
-                ws.data_collected_at = data_collected_at.to_string();
-                ws.generating_since = String::new();
-                ws.israel_attack_warning = output.israel_attack_warning.display_reason().to_string();
-                ws.israel_actual_red_alerts = output.israel_actual_red_alerts.display_reason().to_string();
-                ws.attack_involves_missiles_not_just_uavs = output.attack_involves_missiles_not_just_uavs.display_reason().to_string();
-                ws.jerusalem_attack_warning = output.jerusalem_attack_warning.display_reason().to_string();
-                ws.jerusalem_actual_red_alerts = output.jerusalem_actual_red_alerts.display_reason().to_string();
-                ws.center_dan_or_yehuda_or_jerusalem_danger = output.center_dan_or_yehuda_or_jerusalem_danger.display_reason().to_string();
-                ws.confirmed_center_attack_not_just_north_south = output.confirmed_center_attack_not_just_north_south.display_reason().to_string();
-                ws.any_threat = any_threat;
-                ws.news = output.updates.iter().map(|it| WebNewsItem {
-                    channel: it.channel.clone(),
-                    headline: it.headline.clone(),
-                    importance: it.importance.clone(),
-                    time_of_report: it.time_of_report.clone(),
-                    time_of_event: it.time_of_event.clone(),
-                    summary: it.summary.clone(),
-                }).collect();
-            }
         }
-        Err(e) => {
-            // Clear generating state even on parse failure.
-            web_state.write().expect("web state lock poisoned").generating_since = String::new();
-            log::warn!(
-                "LLM response was not valid JSON ({}) — printing raw. \
-                 First 500 chars of cleaned output: '{}'",
-                e,
-                &cleaned[..500.min(cleaned.len())]
-            );
-            println!(
-                "{YELLOW}[{}] (raw){RESET} {}",
-                Utc::now().with_timezone(&TZ_JERUSALEM).format("%H:%M:%S"),
-                cleaned.trim()
-            );
-        }
+    }
+
+    // Update shared web state for the dashboard.
+    {
+        let mut ws = web_state.write().expect("web state lock poisoned");
+        ws.version += 1;
+        ws.data_collected_at = data_collected_at.to_string();
+        ws.generating_since = String::new();
+        ws.israel_attack_warning = threats.israel_attack_warning.display_reason().to_string();
+        ws.israel_actual_red_alerts = threats.israel_actual_red_alerts.display_reason().to_string();
+        ws.attack_involves_missiles_not_just_uavs = threats.attack_involves_missiles_not_just_uavs.display_reason().to_string();
+        ws.jerusalem_attack_warning = threats.jerusalem_attack_warning.display_reason().to_string();
+        ws.jerusalem_actual_red_alerts = threats.jerusalem_actual_red_alerts.display_reason().to_string();
+        ws.center_dan_or_yehuda_or_jerusalem_danger = threats.center_dan_or_yehuda_or_jerusalem_danger.display_reason().to_string();
+        ws.confirmed_center_attack_not_just_north_south = threats.confirmed_center_attack_not_just_north_south.display_reason().to_string();
+        ws.any_threat = any_threat;
+        ws.news = news.updates.iter().map(|it| WebNewsItem {
+            channel: it.channel.clone(),
+            headline: it.headline.clone(),
+            importance: it.importance.clone(),
+            time_of_report: it.time_of_report.clone(),
+            time_of_event: it.time_of_event.clone(),
+            summary: it.summary.clone(),
+        }).collect();
     }
 }
 

@@ -158,6 +158,50 @@ impl OllamaClient {
                 repeat_penalty: 1.0,
             },
         };
+        self.send_and_stream(request).await
+    }
+
+    /// Send a multi-turn conversation to the LLM and collect the streamed response.
+    ///
+    /// Each entry in `messages` is a `(role, content)` pair — typically alternating
+    /// "user" and "assistant" messages that form the conversation history.
+    /// `max_tokens` controls `num_predict` for this request (allows limiting
+    /// freeform follow-up turns while keeping structured turns generous).
+    pub async fn query_conversation(
+        &self,
+        messages: &[(&str, &str)],
+        max_tokens: u64,
+    ) -> Result<String> {
+        let request = ChatRequest {
+            model: self.model.clone(),
+            messages: messages
+                .iter()
+                .map(|(role, content)| ChatMessage {
+                    role: role.to_string(),
+                    content: content.to_string(),
+                })
+                .collect(),
+            stream: true,
+            think: false,
+            options: ChatOptions {
+                num_ctx: 131072,
+                num_predict: max_tokens,
+                temperature: 0.7,
+                top_k: 20,
+                top_p: 0.8,
+                presence_penalty: 1.5,
+                repeat_penalty: 1.0,
+            },
+        };
+        self.send_and_stream(request).await
+    }
+
+    /// Internal: send a chat request and stream the full response.
+    ///
+    /// Shared by `query()` (single message) and `query_conversation()` (multi-turn).
+    /// Handles HTTP errors, newline-delimited JSON streaming, and performance logging.
+    async fn send_and_stream(&self, request: ChatRequest) -> Result<String> {
+        let msg_count = request.messages.len();
 
         let response = self
             .http
@@ -238,11 +282,11 @@ impl OllamaClient {
 
         ensure!(
             !full_content.is_empty(),
-            "Ollama returned an empty response for model '{}' — \
-             the prompt was {} chars. The model may have hit a stop token immediately \
-             or the context window ({} tokens) may be too small for the prompt",
+            "Ollama returned an empty response for model '{}' ({} messages in conversation). \
+             The model may have hit a stop token immediately \
+             or the context window ({} tokens) may be too small",
             self.model,
-            prompt.len(),
+            msg_count,
             131072
         );
 
