@@ -416,21 +416,31 @@ fn build_prompt_text(
     )
     .unwrap();
     writeln!(&mut prompt).unwrap();
-    writeln!(&mut prompt, "=== CHANNEL MESSAGES ===").unwrap();
+    writeln!(&mut prompt, "Messages are listed in strict chronological order (oldest first) across all channels so you can follow the timeline of events:").unwrap();
+    writeln!(&mut prompt).unwrap();
+    writeln!(&mut prompt, "=== MESSAGES (CHRONOLOGICAL) ===").unwrap();
 
-    for (snap, msgs) in channel_messages {
-        writeln!(&mut prompt).unwrap();
-        writeln!(&mut prompt, "--- {} ---", snap.channel_title).unwrap();
-        for msg in msgs {
-            let local_time = msg.date.with_timezone(&TZ_JERUSALEM);
-            writeln!(
-                &mut prompt,
-                "[{}] {}",
-                local_time.format("%Y-%m-%d %H:%M:%S"),
-                msg.text
-            )
-            .unwrap();
-        }
+    // Flatten all messages into a single chronological stream so the LLM
+    // sees events unfold in order across channels — critical for understanding
+    // when an event starts vs. when it ends.
+    let mut all_msgs: Vec<(&ChannelMessage, &str)> = channel_messages
+        .iter()
+        .flat_map(|(snap, msgs)| {
+            msgs.iter().map(move |msg| (*msg, snap.channel_title.as_str()))
+        })
+        .collect();
+    all_msgs.sort_by_key(|(msg, _)| msg.date);
+
+    for (msg, channel) in &all_msgs {
+        let local_time = msg.date.with_timezone(&TZ_JERUSALEM);
+        writeln!(
+            &mut prompt,
+            "[{}] [{}] {}",
+            local_time.format("%Y-%m-%d %H:%M:%S"),
+            channel,
+            msg.text
+        )
+        .unwrap();
     }
 
     writeln!(&mut prompt).unwrap();
