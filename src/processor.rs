@@ -433,10 +433,19 @@ fn build_prompt_text(
 
     for (msg, channel) in &all_msgs {
         let local_time = msg.date.with_timezone(&TZ_JERUSALEM);
+        let ago = newest - msg.date;
+        let ago_str = if ago.num_seconds() < 60 {
+            format!("{}s ago", ago.num_seconds())
+        } else if ago.num_minutes() < 60 {
+            format!("{}m ago", ago.num_minutes())
+        } else {
+            format!("{}h {}m ago", ago.num_hours(), ago.num_minutes() % 60)
+        };
         writeln!(
             &mut prompt,
-            "[{}] [{}] {}",
-            local_time.format("%Y-%m-%d %H:%M:%S"),
+            "[{} ({})] [{}] {}",
+            local_time.format("%H:%M:%S"),
+            ago_str,
             channel,
             msg.text
         )
