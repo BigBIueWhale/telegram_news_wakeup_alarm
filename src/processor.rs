@@ -443,13 +443,6 @@ fn build_prompt_text(
         r#"Respond with ONLY a JSON object in the exact format below. No other text before or after the JSON.
 
 {{
-  "israel_attack_warning": "",
-  "israel_actual_red_alerts": "",
-  "attack_involves_missiles_not_just_uavs": "",
-  "jerusalem_attack_warning": "",
-  "jerusalem_actual_red_alerts": "",
-  "center_dan_or_yehuda_or_jerusalem_danger": "",
-  "confirmed_center_attack_not_just_north_south": "",
   "updates": [
     {{
       "channel": "channel name",
@@ -460,6 +453,13 @@ fn build_prompt_text(
       "summary": "1-2 sentence information-dense summary"
     }}
   ],
+  "israel_attack_warning": "",
+  "israel_actual_red_alerts": "",
+  "attack_involves_missiles_not_just_uavs": "",
+  "jerusalem_attack_warning": "",
+  "jerusalem_actual_red_alerts": "",
+  "center_dan_or_yehuda_or_jerusalem_danger": "",
+  "confirmed_center_attack_not_just_north_south": "",
   "meta": {{
     "channels_analyzed": {num_channels},
     "time_window_minutes": {focus_minutes},
@@ -491,6 +491,8 @@ Once the appropriate condition is met, set ALL of the following to "": israel_at
 IMPORTANT CONTEXT — IRANIAN ATTACKS ONLY: Pikud HaOref often fails to give Jerusalem explicit early warning for Iranian ballistic missiles. There are TWO known gaps: (1) Missiles heading to Merkaz/Gush Dan fly over Jerusalem, but Jerusalem sirens may not activate until impact is imminent (~1.5 min). (2) Missiles targeting Yehuda (Judea), Negev, or Otef Aza fly over southern Jerusalem, but Pikud HaOref does NOT alarm Jerusalem at all for this trajectory. The user sleeps in southern Jerusalem and needs ~7 minutes from EARLY WARNING to reach shelter. Therefore: for IRANIAN attacks, err on the side of a non-empty reason for any field where there is reasonable doubt about an ACTIVE threat. A false positive (unnecessary wake-up) is infinitely better than a false negative (sleeping through an attack). For attacks from Hezbollah, Houthis, or Gaza, trust Pikud HaOref's regional targeting — these are shorter-range and Pikud HaOref handles their trajectories correctly. Do NOT set fields non-empty for past events, historical analysis, or speculative future threats — only for RIGHT NOW.
 
 IMPORTANT: An attack ON Israel does NOT mean Israel will attack back imminently. Do not conflate reports of Israeli offensive operations or retaliation plans with incoming threats to Israel. Only set fields non-empty when there is an incoming threat TO Israel, not outgoing attacks FROM Israel.
+
+CRITICAL — DO NOT HALLUCINATE ACTIVE THREATS FROM PAST EVENTS: The message history contains messages spanning a wide time window. If an event that threatened a location started at, say, 22:00 and a later message (e.g. at 22:30) announces that the event has concluded for that location ("event over", "safe to exit", "threat ended", "all clear"), then the threat fields for that location must be "". All the alarming messages from 22:00–22:29 are HISTORICAL — they describe a threat that no longer exists. Always check the LATEST message about an event's status for a given location before setting any field non-empty. Read the timeline forward: what matters is the FINAL STATUS, not the dramatic messages from when it was active.
 
 Rules:
 - Respond ENTIRELY in English (the source messages may be in Hebrew, Arabic, or other languages — translate everything to English)
