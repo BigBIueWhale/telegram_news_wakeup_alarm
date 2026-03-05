@@ -59,6 +59,7 @@ html,body{height:100%;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Ro
 /* Threat panel */
 #threat-panel{border-radius:12px;padding:16px;margin-bottom:16px}
 #threat-panel.clear{background:var(--card);border:1px solid var(--border)}
+#threat-panel.warn{background:#2a1e00;border:2px solid var(--yellow)}
 #threat-panel.alert{background:var(--urgentbg);border:2px solid var(--red);
   animation:pulse 1.5s infinite}
 @keyframes pulse{0%,100%{box-shadow:0 0 0 0 rgba(248,81,73,0.4)}50%{box-shadow:0 0 20px 4px rgba(248,81,73,0.3)}}
@@ -68,10 +69,12 @@ html,body{height:100%;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Ro
 .bool-badge{text-align:center;padding:3px 8px;border-radius:6px;font-weight:700;
   font-size:.8rem;line-height:1.4;align-self:center}
 .bool-badge.yes{background:var(--red);color:#fff}
+.bool-badge.yes-warn{background:var(--yellow);color:#000}
 .bool-badge.no{background:#1a2a1a;color:var(--green);opacity:.5}
 .bool-info{display:flex;flex-direction:column;gap:2px;justify-content:center}
 .bool-label{line-height:1.3}
 .bool-label.active{color:var(--red);font-weight:600}
+.bool-label.active-warn{color:var(--yellow);font-weight:600}
 .bool-label.inactive{color:var(--dim)}
 .bool-reason{font-size:.8rem;font-weight:600;color:var(--yellow);line-height:1.3;
   min-height:1.1rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -1156,15 +1159,30 @@ function updateMuteBtn(muteId, enabled, isTick){
   btn.innerHTML = icon + ' ' + (isTick ? 'TICK' : 'ALARM');
 }
 
+// Keys for the 4 Jerusalem/Center fields that trigger full red alert.
+var CENTER_KEYS = [
+  'jerusalem_attack_warning','jerusalem_actual_red_alerts',
+  'center_dan_or_yehuda_or_jerusalem_danger','confirmed_center_attack_not_just_north_south'
+];
+// Keys for Israel-wide fields (yellow warning only, no red).
+var ISRAEL_KEYS = [
+  'israel_attack_warning','israel_actual_red_alerts','attack_involves_missiles_not_just_uavs'
+];
+
 function renderThreat(d){
   try{
     var panel  = document.getElementById('threat-panel');
     var header = document.getElementById('threat-header');
     var bools  = document.getElementById('threat-bools');
-    var anyThreat = d.any_threat === true;
-    if(anyThreat){
+    var _ne = function(k){ return typeof d[k] === 'string' && d[k].length > 0; };
+    var centerThreat = CENTER_KEYS.some(_ne);
+    var israelThreat = ISRAEL_KEYS.some(_ne);
+    if(centerThreat){
       panel.className = 'alert';
       header.innerHTML = '<span style="color:var(--red)">\u26A0 THREAT ALERT \u2014 WAKE UP \u26A0</span>';
+    }else if(israelThreat){
+      panel.className = 'warn';
+      header.innerHTML = '<span style="color:var(--yellow)">\u26A0 ISRAEL THREAT \u2014 MONITORING</span>';
     }else{
       panel.className = 'clear';
       header.innerHTML = '<span style="color:var(--green)">ALL CLEAR</span>';
@@ -1188,9 +1206,13 @@ function renderThreat(d){
       var key = row[0], label = row[1];
       var reason = typeof d[key] === 'string' ? d[key] : '';
       var active = reason.length > 0;
-      html += '<div class="bool-row"><span class="bool-badge ' + (active ? 'yes' : 'no') + '">'
+      // Israel-wide fields get yellow styling; Jerusalem/Center fields get red.
+      var isIsrael = ISRAEL_KEYS.indexOf(key) !== -1;
+      var badgeCls = active ? (isIsrael ? 'yes-warn' : 'yes') : 'no';
+      var labelCls = active ? (isIsrael ? 'active-warn' : 'active') : 'inactive';
+      html += '<div class="bool-row"><span class="bool-badge ' + badgeCls + '">'
         + (active ? 'YES' : 'no') + '</span><div class="bool-info"><span class="bool-label '
-        + (active ? 'active' : 'inactive') + '">' + esc(label) + '</span>'
+        + labelCls + '">' + esc(label) + '</span>'
         + '<span class="bool-reason">' + (active ? esc(reason) : '') + '</span>'
         + '</div></div>';
     }
