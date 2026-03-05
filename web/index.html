@@ -426,6 +426,7 @@ console.error = function(){ _origError.apply(console, arguments); try{ _showToas
 var POLL_NORMAL   = 2000;
 var POLL_THREAT   = 1000;
 var FETCH_TIMEOUT = 8000;
+var FETCH_TIMEOUT_FAST = 3000;
 
 // ================================================================
 //  STATE
@@ -438,6 +439,8 @@ var lastData            = null;
 var consecutiveFails    = 0;
 var pollTimer           = null;
 var pollInFlight        = false;
+var pollWorker          = null;   // Web Worker for un-throttled background polling
+var wakeLockSentinel    = null;   // Screen Wake Lock (modern browsers only)
 var timerHandle         = null;
 var everHadData         = false;
 // Channels: store raw data + last server update time for client-side ticking/staleness
@@ -1321,9 +1324,35 @@ function setConnStatus(cls, msg){
 //  POLLING ENGINE (XHR for smart TV compatibility)
 // ================================================================
 
+// Inline Web Worker for background-tab timer (Chrome throttles setTimeout in bg tabs).
+// Falls back to setTimeout on old browsers that lack Worker/Blob/URL.createObjectURL.
+try{
+  var _workerBlob = new Blob(
+    ['var t=null;onmessage=function(e){if(t!==null)clearTimeout(t);t=setTimeout(function(){postMessage(1)},e.data)}'],
+    {type:'application/javascript'}
+  );
+  var _workerUrl = URL.createObjectURL(_workerBlob);
+  pollWorker = new Worker(_workerUrl);
+  pollWorker.onmessage = function(){ poll(); };
+  pollWorker.onerror = function(e){
+    console.error('[WORKER] Worker error, falling back to setTimeout:', e);
+    try{ pollWorker.terminate(); }catch(ex){}
+    pollWorker = null;
+  };
+  try{ URL.revokeObjectURL(_workerUrl); }catch(e2){}
+  console.log('[POLL] Using Web Worker for background-safe polling');
+}catch(e){
+  pollWorker = null;
+  console.log('[POLL] Web Worker unavailable, using setTimeout fallback');
+}
+
 function schedulePoll(delayMs){
-  if(pollTimer !== null){ clearTimeout(pollTimer); pollTimer = null; }
-  pollTimer = setTimeout(poll, delayMs);
+  if(pollWorker){
+    pollWorker.postMessage(delayMs);
+  } else {
+    if(pollTimer !== null){ clearTimeout(pollTimer); pollTimer = null; }
+    pollTimer = setTimeout(poll, delayMs);
+  }
 }
 
 function poll(){
@@ -1362,7 +1391,7 @@ function poll(){
     return;
   }
 
-  xhr.timeout = FETCH_TIMEOUT;
+  xhr.timeout = consecutiveFails > 2 ? FETCH_TIMEOUT_FAST : FETCH_TIMEOUT;
   try{ xhr.setRequestHeader('Accept', 'application/json'); }catch(e){}
 
   xhr.onload = function(){
@@ -1461,6 +1490,35 @@ function poll(){
 }
 
 // ================================================================
+//  SCREEN WAKE LOCK (modern browsers only)
+// ================================================================
+
+// Keeps screen on while tab is visible. Auto-released when tab goes hidden.
+// Also re-acquires automatically if the OS releases it for power-management
+// reasons (low battery) while the page is still visible — visibilitychange
+// does NOT fire in that case, the release event is our only signal.
+function requestWakeLock(){
+  if(!navigator.wakeLock) return;
+  if(wakeLockSentinel) return;  // already held
+  try{
+    navigator.wakeLock.request('screen').then(function(sentinel){
+      wakeLockSentinel = sentinel;
+      sentinel.addEventListener('release', function(){
+        wakeLockSentinel = null;
+        // Re-acquire if page is still visible (handles OS-initiated release)
+        if(document.visibilityState === 'visible'){
+          requestWakeLock();
+        }
+      });
+    }, function(){
+      wakeLockSentinel = null;
+    });
+  }catch(e){
+    wakeLockSentinel = null;
+  }
+}
+
+// ================================================================
 //  PAGE VISIBILITY
 // ================================================================
 
@@ -1474,6 +1532,7 @@ try{
         if(lastData) updateSoundState(lastData);
         if(pollTimer !== null){ clearTimeout(pollTimer); pollTimer = null; }
         schedulePoll(200);
+        requestWakeLock();
       }
     }catch(e){
       console.error('[VIS] visibilitychange handler error:', e);
@@ -1498,6 +1557,28 @@ try{
   });
 }catch(e){}
 
+// Page Lifecycle API — Chrome 68+ can fully freeze background tabs.
+// 'resume' fires when a frozen tab is un-frozen.
+try{
+  document.addEventListener('freeze', function(){
+    console.log('[LIFECYCLE] Page frozen');
+  });
+  document.addEventListener('resume', function(){
+    try{
+      console.log('[LIFECYCLE] Page resumed from freeze');
+      updateTimer();
+      updateGenTimer();
+      updateChannelsFreshness();
+      if(lastData) updateSoundState(lastData);
+      if(pollTimer !== null){ clearTimeout(pollTimer); pollTimer = null; }
+      schedulePoll(200);
+      requestWakeLock();
+    }catch(e){
+      console.error('[LIFECYCLE] resume handler error:', e);
+    }
+  });
+}catch(e){}
+
 // ================================================================
 //  STARTUP
 // ================================================================
@@ -1514,6 +1595,7 @@ function startPolling(){
     updateGenTimer();
     updateChannelsFreshness();
     poll();
+    requestWakeLock();
   }catch(e){
     console.error('[STARTUP] startPolling error:', e);
   }
