@@ -439,7 +439,7 @@ var lastData            = null;
 var consecutiveFails    = 0;
 var pollTimer           = null;
 var pollInFlight        = false;
-var pollWorker          = null;   // Web Worker for un-throttled background polling
+var pollWorker          = null;   // removed: was Web Worker for background polling
 var wakeLockSentinel    = null;   // Screen Wake Lock (modern browsers only)
 var timerHandle         = null;
 var everHadData         = false;
@@ -549,6 +549,7 @@ function releaseAudio(el){
   try{ el.onended = null; }catch(e){}
   try{ el.onerror = null; }catch(e){}
   try{ el.pause(); }catch(e){}
+  try{ el.removeAttribute('src'); el.load(); }catch(e){}
   _audioPool.push(el);
 }
 
@@ -1324,35 +1325,9 @@ function setConnStatus(cls, msg){
 //  POLLING ENGINE (XHR for smart TV compatibility)
 // ================================================================
 
-// Inline Web Worker for background-tab timer (Chrome throttles setTimeout in bg tabs).
-// Falls back to setTimeout on old browsers that lack Worker/Blob/URL.createObjectURL.
-try{
-  var _workerBlob = new Blob(
-    ['var t=null;onmessage=function(e){if(t!==null)clearTimeout(t);t=setTimeout(function(){postMessage(1)},e.data)}'],
-    {type:'application/javascript'}
-  );
-  var _workerUrl = URL.createObjectURL(_workerBlob);
-  pollWorker = new Worker(_workerUrl);
-  pollWorker.onmessage = function(){ poll(); };
-  pollWorker.onerror = function(e){
-    console.error('[WORKER] Worker error, falling back to setTimeout:', e);
-    try{ pollWorker.terminate(); }catch(ex){}
-    pollWorker = null;
-  };
-  try{ URL.revokeObjectURL(_workerUrl); }catch(e2){}
-  console.log('[POLL] Using Web Worker for background-safe polling');
-}catch(e){
-  pollWorker = null;
-  console.log('[POLL] Web Worker unavailable, using setTimeout fallback');
-}
-
 function schedulePoll(delayMs){
-  if(pollWorker){
-    pollWorker.postMessage(delayMs);
-  } else {
-    if(pollTimer !== null){ clearTimeout(pollTimer); pollTimer = null; }
-    pollTimer = setTimeout(poll, delayMs);
-  }
+  if(pollTimer !== null){ clearTimeout(pollTimer); pollTimer = null; }
+  pollTimer = setTimeout(poll, delayMs);
 }
 
 function poll(){
