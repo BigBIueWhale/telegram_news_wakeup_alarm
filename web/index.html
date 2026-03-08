@@ -985,7 +985,9 @@ var EXPECTED_THREAT_STRING_KEYS = [
   'jerusalem_attack_warning',
   'jerusalem_actual_red_alerts',
   'center_dan_or_yehuda_or_jerusalem_danger',
-  'confirmed_center_attack_not_just_north_south'
+  'confirmed_center_attack_not_just_north_south',
+  'shfela_merkaz_attack_warning',
+  'shfela_merkaz_actual_red_alerts'
 ];
 var EXPECTED_BOOL_KEYS = ['any_threat'];
 var EXPECTED_NEWS_STRING_KEYS = [
@@ -1084,6 +1086,8 @@ function validatePayload(d){
       jerusalem_attack_warning:1, jerusalem_actual_red_alerts:1,
       center_dan_or_yehuda_or_jerusalem_danger:1,
       confirmed_center_attack_not_just_north_south:1,
+      shfela_merkaz_attack_warning:1,
+      shfela_merkaz_actual_red_alerts:1,
       any_threat:1, channels:1
     };
     var dKeys = Object.keys(d);
