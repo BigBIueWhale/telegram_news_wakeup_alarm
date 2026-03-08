@@ -813,7 +813,7 @@ async fn query_with_verification(
         .with_context(|| format!(
             "Turn 1 response was not valid JSON — aborting verification. \
              First 500 chars: '{}'",
-            &cleaned1[..500.min(cleaned1.len())]
+            &cleaned1[..safe_truncate(&cleaned1, 500)]
         ))?;
     log::info!("[verify] Turn 1: Format validation passed");
 
@@ -869,7 +869,7 @@ async fn query_with_verification(
         .with_context(|| format!(
             "Turn 3 response was not valid threat JSON — \
              First 500 chars: '{}'",
-            &cleaned3[..500.min(cleaned3.len())]
+            &cleaned3[..safe_truncate(&cleaned3, 500)]
         ))?;
 
     Ok((turn1_parsed, turn3_parsed))
@@ -1034,4 +1034,11 @@ fn extract_json(text: &str) -> &str {
         }
     }
     trimmed
+}
+
+/// Return the largest byte index ≤ `max_bytes` that sits on a UTF-8 char boundary.
+fn safe_truncate(s: &str, max_bytes: usize) -> usize {
+    let mut n = max_bytes.min(s.len());
+    while n > 0 && !s.is_char_boundary(n) { n -= 1; }
+    n
 }
