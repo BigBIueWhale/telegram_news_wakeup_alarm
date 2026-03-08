@@ -26,8 +26,8 @@ const MIN_MESSAGES_TO_PROCESS: usize = 1;
 const VERIFICATION_TURN2_MAX_TOKENS: u64 = 4096;
 
 /// Max tokens for the final corrected threat-only JSON (turn 3). Much smaller
-/// than turn 1 because it only contains the 7 threat fields, not the news array.
-const VERIFICATION_TURN3_MAX_TOKENS: u64 = 1024;
+/// than turn 1 because it only contains the 9 threat fields, not the news array.
+const VERIFICATION_TURN3_MAX_TOKENS: u64 = 1280;
 
 /// Turn 2: Skepticism follow-up. Static prompt — no structured answer expected,
 /// the model just thinks out loud about common mistakes.
@@ -47,7 +47,11 @@ under attack.\n\
 or south? These areas do NOT warrant the Jerusalem/center alarm: Haifa, Galil (Galilee), Beit \
 She'an, Shomron (Samaria), HaSharon (Netanya, Kfar Saba, Herzliya), Sderot, Negev, Yam HaMelach \
 (Dead Sea). Only Gush Dan (Tel Aviv metro), Yehuda (Judea), and Jerusalem itself warrant the \
-alarm.\n\
+alarm. Similarly, did you set the shfela_merkaz fields active for attacks that only target \
+Jerusalem, the north, or the south? The shfela_merkaz fields are ONLY for threats directly \
+targeting the Shfela/Merkaz region — do NOT activate them for Jerusalem-only threats, and do NOT \
+apply the Iranian flight-path logic (that logic applies only to the jerusalem and center_dan \
+fields).\n\
 \n\
 4. Did you set attack_involves_missiles to active for a UAV/drone-only event? UAVs are routine \
 and do NOT warrant waking someone up — only missiles, rockets, or ballistic projectiles do.\n\
@@ -72,7 +76,7 @@ in your initial response, fix them now. If your initial assessment was correct, 
 Remember: active=true means \"this threat is real and happening RIGHT NOW — wake this person up.\" \
 active=false means \"no current threat for this field.\"\n\
 \n\
-Respond with ONLY a JSON object containing the 7 threat fields. Do NOT include the \"updates\" \
+Respond with ONLY a JSON object containing the 9 threat fields. Do NOT include the \"updates\" \
 array — I already have that from your first response. Just the threat booleans and reasons:\n\
 \n\
 {\"israel_attack_warning\":{\"active\":false,\"reason\":\"...\"},\"israel_actual_red_alerts\":\
@@ -80,9 +84,11 @@ array — I already have that from your first response. Just the threat booleans
 \"reason\":\"...\"},\"jerusalem_attack_warning\":{\"active\":false,\"reason\":\"...\"},\
 \"jerusalem_actual_red_alerts\":{\"active\":false,\"reason\":\"...\"},\
 \"center_dan_or_yehuda_or_jerusalem_danger\":{\"active\":false,\"reason\":\"...\"},\
-\"confirmed_center_attack_not_just_north_south\":{\"active\":false,\"reason\":\"...\"}}\n\
+\"confirmed_center_attack_not_just_north_south\":{\"active\":false,\"reason\":\"...\"},\
+\"shfela_merkaz_attack_warning\":{\"active\":false,\"reason\":\"...\"},\
+\"shfela_merkaz_actual_red_alerts\":{\"active\":false,\"reason\":\"...\"}}\n\
 \n\
-No explanation, no preamble, no postamble — only valid JSON with the 7 fields above.";
+No explanation, no preamble, no postamble — only valid JSON with the 9 fields above.";
 
 // ── LLM output types (for JSON parsing validation) ──
 
@@ -137,9 +143,13 @@ struct NewsOutput {
     center_dan_or_yehuda_or_jerusalem_danger: ThreatField,
     #[serde(default)]
     confirmed_center_attack_not_just_north_south: ThreatField,
+    #[serde(default)]
+    shfela_merkaz_attack_warning: ThreatField,
+    #[serde(default)]
+    shfela_merkaz_actual_red_alerts: ThreatField,
 }
 
-/// Turn 3 output: only the 7 threat fields (no news `updates` array).
+/// Turn 3 output: only the 9 threat fields (no news `updates` array).
 /// The news was already validated from turn 1 — turn 3 only corrects threats.
 #[derive(Deserialize, Debug)]
 struct ThreatOnlyOutput {
@@ -157,6 +167,10 @@ struct ThreatOnlyOutput {
     center_dan_or_yehuda_or_jerusalem_danger: ThreatField,
     #[serde(default)]
     confirmed_center_attack_not_just_north_south: ThreatField,
+    #[serde(default)]
+    shfela_merkaz_attack_warning: ThreatField,
+    #[serde(default)]
+    shfela_merkaz_actual_red_alerts: ThreatField,
 }
 
 #[derive(Deserialize, Debug)]
@@ -589,6 +603,8 @@ fn build_prompt_text(
   "jerusalem_actual_red_alerts": {{"active": false, "reason": "sirens in north, not Jerusalem"}},
   "center_dan_or_yehuda_or_jerusalem_danger": {{"active": false, "reason": "attack limited to north/south"}},
   "confirmed_center_attack_not_just_north_south": {{"active": false, "reason": "only north/south confirmed hit"}},
+  "shfela_merkaz_attack_warning": {{"active": false, "reason": "no threat to Shfela/Merkaz region"}},
+  "shfela_merkaz_actual_red_alerts": {{"active": false, "reason": "no sirens in Shfela/Merkaz"}},
   "meta": {{
     "channels_analyzed": {num_channels},
     "time_window_minutes": {focus_minutes},
@@ -597,7 +613,7 @@ fn build_prompt_text(
 }}
 
 CRITICAL — THREAT ASSESSMENT FIELDS:
-The seven threat fields at the top are the PRIMARY PURPOSE of this system. They are used to wake someone sleeping in Jerusalem to reach a bomb shelter in time. Each field is an OBJECT with two keys:
+The nine threat fields at the top are the PRIMARY PURPOSE of this system. They are used to wake someone sleeping in Jerusalem or Center/Shfela to reach a bomb shelter in time. Each field is an OBJECT with two keys:
 - "active": boolean — true if this threat is currently real and imminent, false if not.
 - "reason": string — ALWAYS provide 3-5 words explaining your assessment. When active: WHY it's active (displayed to the user when woken up). When inactive: WHY there is no threat (e.g. "event concluded, all clear", "no attack reports detected", "UAV intercepted, threat over"). You MUST always provide a reason, even when active is false — this is required for output validation.
 
@@ -607,7 +623,7 @@ CLEARING FIELDS — depends on the threat type:
 1. LONG-RANGE (Iran, Yemen, Iraqi militias): Keep active=true until Pikud HaOref (Home Front Command) explicitly announces BOTH that the event is over AND that it is safe to exit safe spaces (due to falling shrapnel/debris risk from interceptions at high altitude). If there is no explicit "you may leave shelters" announcement, keep active=true.
 2. SHORT-RANGE (Gaza rockets, Hezbollah rockets/missiles): Keep active=true for at least 10 minutes after sirens were last heard. No need to wait for a Pikud HaOref announcement — short-range shrapnel settles quickly.
 3. UAVs/DRONES (any origin, any location): Once Pikud HaOref or credible sources say the UAV event has concluded ("threat ended", "UAV intercepted", "event over"), immediately set ALL related fields to active=false with a reason explaining why (e.g. "UAV intercepted, event over"). A concluded UAV event is NOT a threat — no shrapnel wait, no 10-minute timer, no waiting for safe-to-exit. Done means done.
-Once the appropriate condition is met, set ALL of the following to active=false: israel_attack_warning, israel_actual_red_alerts, attack_involves_missiles_not_just_uavs, jerusalem_attack_warning, jerusalem_actual_red_alerts, center_dan_or_yehuda_or_jerusalem_danger, confirmed_center_attack_not_just_north_south. Every single field that was set active because of the event must return to active=false — do not leave stale values in any field. The fields reflect CURRENT DANGER ONLY, not recent history.
+Once the appropriate condition is met, set ALL of the following to active=false: israel_attack_warning, israel_actual_red_alerts, attack_involves_missiles_not_just_uavs, jerusalem_attack_warning, jerusalem_actual_red_alerts, center_dan_or_yehuda_or_jerusalem_danger, confirmed_center_attack_not_just_north_south, shfela_merkaz_attack_warning, shfela_merkaz_actual_red_alerts. Every single field that was set active because of the event must return to active=false — do not leave stale values in any field. The fields reflect CURRENT DANGER ONLY, not recent history.
 
 - israel_attack_warning: active=true if there is ANY early warning, intelligence, or credible report of an incoming or imminent attack on all of Israel or any part of Israel (missiles, drones, rockets from Iran, Hezbollah, Yemen, etc.). Includes launch detections, military alerts, and "prepare for attack" announcements. A confirmed active attack is ALSO a warning — if israel_actual_red_alerts is active, this field must also be active (a square is also a rectangle). Must be CURRENT — not past attacks or theoretical future threats. Active example: "Iran launched missiles toward Israel". Inactive examples: "no incoming attack reports", "previous attack ended, all clear", "only Israeli offensive ops reported", "old report, not happening now".
 - israel_actual_red_alerts: active=true if Pikud HaOref (Home Front Command) has activated actual red alert sirens ANYWHERE in all of Israel, or if credible sources report active sirens/interceptions RIGHT NOW. Active example: "Red alert sirens across Israel". Inactive examples: "no sirens reported anywhere", "sirens ended, event concluded", "last sirens were 40 min ago", "old report, not active now".
@@ -616,6 +632,8 @@ Once the appropriate condition is met, set ALL of the following to active=false:
 - jerusalem_actual_red_alerts: active=true if red alert sirens are active specifically in Jerusalem RIGHT NOW. Active example: "Active sirens sounding in Jerusalem". Inactive examples: "no Jerusalem sirens reported", "sirens in north, not Jerusalem", "Jerusalem sirens ended 20 min ago", "old report, not active now".
 - center_dan_or_yehuda_or_jerusalem_danger: THIS FIELD TRIGGERS A LOUD ALARM. active=true only when there is concrete, credible evidence that ANY of Gush Dan, Yehuda (Judea), Jerusalem, or Merkaz (center Israel) faces an imminent or active threat. For IRANIAN attacks ONLY: these regions are treated as ONE alarm zone because Iranian ballistic missiles to Merkaz/Gush Dan fly over Jerusalem, and missiles to Yehuda/Negev fly over southern Jerusalem. Pikud HaOref fails to alarm Jerusalem for these trajectories, so any confirmed Iranian strike on ANY of these regions endangers someone sleeping in southern Jerusalem. For attacks from HEZBOLLAH, HOUTHIS (Yemen), or GAZA: trust Pikud HaOref's targeting — only set active=true if Pikud HaOref or credible sources specifically indicate center/Jerusalem is targeted (not just north or south). Do NOT set active=true for: vague warnings, political rhetoric, unverified claims. A confirmed center attack is ALSO an imminent danger — if confirmed_center_attack_not_just_north_south is active, this field must also be active (a square is also a rectangle). Active example: "Missiles inbound to Gush Dan". Inactive examples: "attack limited to north/south", "center event over, all clear", "no center region threats", "old report, not happening now".
 - confirmed_center_attack_not_just_north_south: THIS FIELD TRIGGERS A LOUD ALARM. It requires CONFIRMED evidence that an attack is actually happening or confirmed launched toward central Israel, Yehuda (Judea), or Jerusalem — not speculation, not "might happen", not political tension. Early warning (10-15 min before impact) is GOOD and desired, but only if the attack is CONFIRMED (e.g. launches detected, missiles in the air, credible military sources confirm an ongoing strike). Set active=false if: the danger has passed, the attack is over, or you are guessing/speculating without concrete reports. For IRANIAN attacks: set active=true if Merkaz/Gush Dan/Tel Aviv/Jerusalem/Yehuda is under confirmed attack (flight paths cross Jerusalem). For HEZBOLLAH/HOUTHIS/GAZA: set active=true only if Pikud HaOref or credible sources specifically confirm center/Jerusalem is targeted — do NOT extrapolate from north-only or south-only attacks. Active example: "Confirmed strike heading toward center". Inactive examples: "only north/south confirmed hit", "unconfirmed reports, not verified", "center attack ended per HFC", "old report, not current threat".
+- shfela_merkaz_attack_warning: THIS FIELD TRIGGERS A LOUD ALARM. active=true when there is concrete, credible evidence of an imminent or active threat specifically to the Shfela (lowlands) or Merkaz (center) region. This includes Gush Dan (Tel Aviv, Ramat Gan, Bnei Brak, Petah Tikva, Bat Yam, Holon), the Shfela (Rehovot, Rishon LeZion, Ramle, Lod, Ashdod, Gedera, Yavne, Modi'in), and other Merkaz areas. This field is for someone sleeping in the CENTER region, NOT in Jerusalem — do NOT activate this field because of Jerusalem-only threats. Do NOT apply the Iranian flight-path logic here (that logic is only for the jerusalem_* and center_dan_* fields). Trust Pikud HaOref's targeting assessment for ALL attack origins (Iran, Hezbollah, Gaza, Yemen). Only set active=true when Shfela/Merkaz is DIRECTLY targeted or when sirens/alerts specifically mention the center region. Active example: "Missiles targeting Gush Dan/Shfela". Inactive examples: "attack targets Jerusalem only", "north/south attack only", "no threat to Shfela/Merkaz", "event concluded".
+- shfela_merkaz_actual_red_alerts: active=true if red alert sirens are active specifically in the Shfela or Merkaz region RIGHT NOW. Sirens only in Jerusalem, the north, or the south do NOT count — only sirens in Gush Dan, Shfela, or Merkaz areas. Active example: "Sirens sounding in Gush Dan". Inactive examples: "no Shfela/Merkaz sirens", "sirens in Jerusalem only", "sirens ended 15 min ago".
 
 IMPORTANT CONTEXT — IRANIAN ATTACKS ONLY: Pikud HaOref often fails to give Jerusalem explicit early warning for Iranian ballistic missiles. There are TWO known gaps: (1) Missiles heading to Merkaz/Gush Dan fly over Jerusalem, but Jerusalem sirens may not activate until impact is imminent (~1.5 min). (2) Missiles targeting Yehuda (Judea), Negev, or Otef Aza fly over southern Jerusalem, but Pikud HaOref does NOT alarm Jerusalem at all for this trajectory. The user sleeps in southern Jerusalem and needs ~7 minutes from EARLY WARNING to reach shelter. Therefore: for IRANIAN attacks, err on the side of active=true for any field where there is reasonable doubt about an ACTIVE threat. A false positive (unnecessary wake-up) is infinitely better than a false negative (sleeping through an attack). For attacks from Hezbollah, Houthis, or Gaza, trust Pikud HaOref's regional targeting — these are shorter-range and Pikud HaOref handles their trajectories correctly. Do NOT set fields to active=true for past events, historical analysis, or speculative future threats — only for RIGHT NOW.
 
@@ -928,7 +946,9 @@ fn display_verified_output(
         || threats.jerusalem_attack_warning.active
         || threats.jerusalem_actual_red_alerts.active
         || threats.center_dan_or_yehuda_or_jerusalem_danger.active
-        || threats.confirmed_center_attack_not_just_north_south.active;
+        || threats.confirmed_center_attack_not_just_north_south.active
+        || threats.shfela_merkaz_attack_warning.active
+        || threats.shfela_merkaz_actual_red_alerts.active;
 
     let now = Utc::now().with_timezone(&TZ_JERUSALEM).format("%H:%M:%S");
 
@@ -955,6 +975,9 @@ fn display_verified_output(
     println!("  {DIM}── Center / Dan / Yehuda / Jerusalem ─{RESET}");
     println!("{}", fmt_threat("Imminent danger", threats.center_dan_or_yehuda_or_jerusalem_danger.display_reason()));
     println!("{}", fmt_threat("Confirmed center/Jerusalem attack (not just N/S)", threats.confirmed_center_attack_not_just_north_south.display_reason()));
+    println!("  {DIM}── Shfela / Merkaz ────────────────────{RESET}");
+    println!("{}", fmt_threat("Attack warning", threats.shfela_merkaz_attack_warning.display_reason()));
+    println!("{}", fmt_threat("Red alerts active", threats.shfela_merkaz_actual_red_alerts.display_reason()));
     println!("  {DIM}─────────────────────────────────────────{RESET}");
     println!();
 
@@ -993,6 +1016,8 @@ fn display_verified_output(
         ws.jerusalem_actual_red_alerts = threats.jerusalem_actual_red_alerts.display_reason().to_string();
         ws.center_dan_or_yehuda_or_jerusalem_danger = threats.center_dan_or_yehuda_or_jerusalem_danger.display_reason().to_string();
         ws.confirmed_center_attack_not_just_north_south = threats.confirmed_center_attack_not_just_north_south.display_reason().to_string();
+        ws.shfela_merkaz_attack_warning = threats.shfela_merkaz_attack_warning.display_reason().to_string();
+        ws.shfela_merkaz_actual_red_alerts = threats.shfela_merkaz_actual_red_alerts.display_reason().to_string();
         ws.any_threat = any_threat;
         ws.news = news.updates.iter().map(|it| WebNewsItem {
             channel: it.channel.clone(),

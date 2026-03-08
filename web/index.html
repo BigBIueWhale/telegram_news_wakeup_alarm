@@ -24,10 +24,24 @@ html,body{height:100%;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Ro
 #welcome.hidden{opacity:0;pointer-events:none}
 #welcome h1{font-size:2rem;margin-bottom:1rem;color:var(--cyan)}
 #welcome p{color:var(--dim);margin-bottom:2rem;text-align:center;max-width:24rem;line-height:1.5}
-#welcome button{font-size:1.3rem;padding:1rem 3rem;border:none;border-radius:12px;
+#welcome button.welcome-enter{font-size:1.3rem;padding:1rem 3rem;border:none;border-radius:12px;
   background:var(--cyan);color:var(--bg);cursor:pointer;font-weight:700;
   transition:transform .1s}
-#welcome button:active{transform:scale(0.95)}
+#welcome button.welcome-enter:active{transform:scale(0.95)}
+
+/* Location push-button toggle */
+.loc-group{display:flex;gap:16px;margin-bottom:2rem;justify-content:center}
+.loc-btn{width:160px;padding:1rem 1.2rem;font-size:1.05rem;font-weight:700;
+  border-radius:12px;cursor:pointer;transition:all .2s ease;text-align:center;
+  letter-spacing:.01em;line-height:1.3;user-select:none;-webkit-user-select:none}
+.loc-btn.out{background:var(--card);color:var(--dim);
+  border:2px solid var(--border);
+  box-shadow:0 3px 6px rgba(0,0,0,.4), 0 1px 0 rgba(255,255,255,.04) inset}
+.loc-btn.out:hover{border-color:var(--cyan);color:var(--text);
+  box-shadow:0 3px 8px rgba(0,0,0,.5), 0 1px 0 rgba(255,255,255,.06) inset}
+.loc-btn.in{background:rgba(88,166,255,.13);color:var(--cyan);
+  border:2px solid var(--cyan);
+  box-shadow:0 0 12px rgba(88,166,255,.2), inset 0 2px 6px rgba(0,0,0,.5)}
 
 /* Connection status bar */
 #conn-bar{position:fixed;top:0;left:0;right:0;z-index:100;padding:6px 12px;
@@ -173,8 +187,12 @@ html,body{height:100%;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Ro
 <!-- Welcome overlay for Chrome autoplay unlock -->
 <div id="welcome">
   <h1>News Alarm</h1>
-  <p>This dashboard monitors Telegram news channels for threat alerts. Tap below to enable sound alerts.</p>
-  <button onclick="unlock()">Enable Alerts &amp; Enter</button>
+  <p>This dashboard monitors Telegram news channels for threat alerts. Choose your location, then tap below to enable sound alerts.</p>
+  <div class="loc-group">
+    <button id="loc-jerusalem" class="loc-btn in" onclick="selectLocation('jerusalem')">Jerusalem</button>
+    <button id="loc-shfela" class="loc-btn out" onclick="selectLocation('shfela')">Center / Shfela</button>
+  </div>
+  <button class="welcome-enter" onclick="unlock()">Enable Alerts &amp; Enter</button>
   <label id="tick-toggle" style="margin-top:2.2rem;display:flex;align-items:center;gap:.75rem;
     cursor:pointer;user-select:none;-webkit-user-select:none;padding:.6rem 1.4rem;
     border-radius:10px;background:rgba(255,255,255,.06);border:1px solid var(--border);
@@ -482,7 +500,9 @@ var _audioPool  = [];
 var _POOL_SIZE  = 10;
 var tickEnabled     = true;      // user preference: play tick sounds for minor threats
 var alarmJerusalemEnabled = true; // user preference: play alarm for Jerusalem fields
-var alarmCenterEnabled    = true; // user preference: play alarm for Center fields
+var alarmCenterEnabled    = true; // user preference: play alarm for Center/Dan/Yehuda/Jerusalem fields
+var alarmShfelaEnabled    = false; // user preference: play alarm for Shfela/Merkaz fields
+var userLocation = 'jerusalem';  // 'jerusalem' or 'shfela' — set on welcome screen
 
 // ================================================================
 //  AUDIO ENGINE — <audio> ELEMENTS ONLY
@@ -716,7 +736,11 @@ function updateSoundState(data){
       data.center_dan_or_yehuda_or_jerusalem_danger,
       data.confirmed_center_attack_not_just_north_south
     ].some(_nonEmpty);
-    var shouldAlarm = jerusalemActive || centerActive;
+    var shfelaActive = alarmShfelaEnabled && [
+      data.shfela_merkaz_attack_warning,
+      data.shfela_merkaz_actual_red_alerts
+    ].some(_nonEmpty);
+    var shouldAlarm = jerusalemActive || centerActive || shfelaActive;
     if(shouldAlarm){
       target = 'alarm';
     }else if(data.any_threat === true && tickEnabled){
@@ -830,10 +854,42 @@ window.toggleAlarmCenter = function(){
   }
 };
 
+window.toggleAlarmShfela = function(){
+  alarmShfelaEnabled = !alarmShfelaEnabled;
+  console.log('[ALARM] Shfela toggle: ' + (alarmShfelaEnabled ? 'ON' : 'OFF'));
+  updateMuteBtn('alarmShfela', alarmShfelaEnabled, false);
+  if(audioUnlocked && !testMode && lastData){
+    updateSoundState(lastData);
+  }
+};
+
+window.selectLocation = function(loc){
+  userLocation = loc;
+  document.getElementById('loc-jerusalem').className = 'loc-btn ' + (loc === 'jerusalem' ? 'in' : 'out');
+  document.getElementById('loc-shfela').className = 'loc-btn ' + (loc === 'shfela' ? 'in' : 'out');
+  if(loc === 'jerusalem'){
+    alarmJerusalemEnabled = true;
+    alarmCenterEnabled = true;
+    alarmShfelaEnabled = false;
+  }else{
+    alarmJerusalemEnabled = false;
+    alarmCenterEnabled = false;
+    alarmShfelaEnabled = true;
+  }
+  console.log('[LOC] Selected: ' + loc + ' (jer=' + alarmJerusalemEnabled + ' ctr=' + alarmCenterEnabled + ' shf=' + alarmShfelaEnabled + ')');
+  updateMuteBtn('alarmJerusalem', alarmJerusalemEnabled, false);
+  updateMuteBtn('alarmCenter', alarmCenterEnabled, false);
+  updateMuteBtn('alarmShfela', alarmShfelaEnabled, false);
+  if(audioUnlocked && !testMode && lastData){
+    updateSoundState(lastData);
+  }
+};
+
 window.toggleMute = function(muteId){
   if(muteId === 'tick') window.toggleTick();
   else if(muteId === 'alarmJerusalem') window.toggleAlarmJerusalem();
   else if(muteId === 'alarmCenter') window.toggleAlarmCenter();
+  else if(muteId === 'alarmShfela') window.toggleAlarmShfela();
 };
 
 // ================================================================
@@ -1136,7 +1192,10 @@ var THREAT_ROWS = [
   ['jerusalem_actual_red_alerts','Red alerts active'],
   {group:'Center / Dan / Yehuda / Jerusalem', muteType:'alarm', muteId:'alarmCenter'},
   ['center_dan_or_yehuda_or_jerusalem_danger','Imminent danger'],
-  ['confirmed_center_attack_not_just_north_south','Confirmed center/Jerusalem attack (not just N/S)']
+  ['confirmed_center_attack_not_just_north_south','Confirmed center/Jerusalem attack (not just N/S)'],
+  {group:'Shfela / Merkaz', muteType:'alarm', muteId:'alarmShfela'},
+  ['shfela_merkaz_attack_warning','Attack warning'],
+  ['shfela_merkaz_actual_red_alerts','Red alerts active']
 ];
 
 function esc(s){
@@ -1166,7 +1225,8 @@ function updateMuteBtn(muteId, enabled, isTick){
 // Keys for the 4 Jerusalem/Center fields that trigger full red alert.
 var CENTER_KEYS = [
   'jerusalem_attack_warning','jerusalem_actual_red_alerts',
-  'center_dan_or_yehuda_or_jerusalem_danger','confirmed_center_attack_not_just_north_south'
+  'center_dan_or_yehuda_or_jerusalem_danger','confirmed_center_attack_not_just_north_south',
+  'shfela_merkaz_attack_warning','shfela_merkaz_actual_red_alerts'
 ];
 // Keys for Israel-wide fields (yellow warning only, no red).
 var ISRAEL_KEYS = [
@@ -1198,7 +1258,7 @@ function renderThreat(d){
         var btnHtml = '';
         if(row.muteId){
           var isTick = row.muteType === 'tick';
-          var enabled = isTick ? tickEnabled : (row.muteId === 'alarmJerusalem' ? alarmJerusalemEnabled : alarmCenterEnabled);
+          var enabled = isTick ? tickEnabled : (row.muteId === 'alarmJerusalem' ? alarmJerusalemEnabled : (row.muteId === 'alarmShfela' ? alarmShfelaEnabled : alarmCenterEnabled));
           var btnCls = 'group-mute-btn ' + (isTick ? 'tick-btn' : 'alarm-btn') + (enabled ? '' : ' muted');
           var icon = isTick ? (enabled ? ICON_SPEAKER : ICON_SPEAKER_OFF) : (enabled ? ICON_BELL : ICON_BELL_OFF);
           var lbl = isTick ? 'TICK' : 'ALARM';

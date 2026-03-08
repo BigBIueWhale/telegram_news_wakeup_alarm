@@ -30,6 +30,9 @@ pub struct WebUpdate {
     pub jerusalem_actual_red_alerts: String,
     pub center_dan_or_yehuda_or_jerusalem_danger: String,
     pub confirmed_center_attack_not_just_north_south: String,
+    // Shfela / Merkaz (independent alarm trigger for center residents)
+    pub shfela_merkaz_attack_warning: String,
+    pub shfela_merkaz_actual_red_alerts: String,
     pub any_threat: bool,
     /// ISO-8601 timestamp of when the LLM started generating the current response.
     /// Empty string means the LLM is idle (not generating).
