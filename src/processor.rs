@@ -44,9 +44,10 @@ threats to Israel? Reports about Israeli airstrikes in Lebanon or Syria do NOT m
 under attack.\n\
 \n\
 3. Did you set jerusalem/center fields to active because of an attack that only targets the north \
-or south? Hezbollah rockets hitting Haifa do NOT threaten Jerusalem. Gaza rockets hitting Sderot \
-do NOT threaten Jerusalem. Only Iranian ballistic missiles to center/Gush Dan/Yehuda warrant the \
-Jerusalem alarm.\n\
+or south? These areas do NOT warrant the Jerusalem/center alarm: Haifa, Galil (Galilee), Beit \
+She'an, Shomron (Samaria), HaSharon (Netanya, Kfar Saba, Herzliya), Sderot, Negev, Yam HaMelach \
+(Dead Sea). Only Gush Dan (Tel Aviv metro), Yehuda (Judea), and Jerusalem itself warrant the \
+alarm.\n\
 \n\
 4. Did you set attack_involves_missiles to active for a UAV/drone-only event? UAVs are routine \
 and do NOT warrant waking someone up — only missiles, rockets, or ballistic projectiles do.\n\
