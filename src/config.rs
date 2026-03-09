@@ -4,11 +4,13 @@ use std::path::Path;
 /// Monitored news channel name patterns (substring match against channel title).
 /// Only channels whose title contains one of these substrings will be tracked.
 /// Everything else (TV shows, government services, etc.) is ignored.
+/// NOTE: Adding more channels beyond this count will cause 40+ second delays
+/// on all channels due to the polling update frequency we use. This is the
+/// practical maximum for acceptable latency.
 const NEWS_CHANNEL_PATTERNS: &[&str] = &[
     "חדשות מתפרצות",
     "חדשות בטחון",
     "דניאל עמרם",
-    "צבי יחזקאלי",
     "100שטח",
     "חדשות 18",
     "חדשות ישראל",
